@@ -13,6 +13,7 @@ const {
 const prisma = require('../utils/prisma');
 
 const OTP_TTL_MS = 5 * 60 * 1000;
+const OAUTH_SESSION_TTL_MS = 10 * 60 * 1000;
 
 function parseBody(schema, req) {
   const result = schema.safeParse(req.body);
@@ -268,10 +269,173 @@ exports.logout = catchAsync(async (req, res) => {
   res.json({ status: 'success' });
 });
 
-exports.getInterestsCatalog = catchAsync(async (req, res) => {
-  const interests = await prisma.interest.findMany({
-    orderBy: [{ category: 'asc' }, { name: 'asc' }]
+exports.googleVerify = catchAsync(async (req, res) => {
+  const { idToken } = parseBody(z.object({ idToken: z.string().min(50) }), req);
+
+  if (!process.env.GOOGLE_CLIENT_ID) {
+    throw new AppError('GOOGLE_CLIENT_ID is not configured', 500);
+  }
+
+  // Lazy-load so non-google flows don't require the dependency at runtime.
+  // eslint-disable-next-line global-require
+  const { OAuth2Client } = require('google-auth-library');
+  const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
+
+  let payload;
+  try {
+    const ticket = await client.verifyIdToken({
+      idToken,
+      audience: process.env.GOOGLE_CLIENT_ID
+    });
+    payload = ticket.getPayload();
+  } catch {
+    throw new AppError('Invalid Google token', 401);
+  }
+
+  const googleSub = payload?.sub;
+  if (!googleSub) throw new AppError('Google token missing subject', 401);
+
+  // If user already exists, treat as login.
+  const existingUser = await prisma.user.findFirst({
+    where: { googleSub },
+    include: { interests: { include: { interest: true } } }
   });
-  res.json({ status: 'success', data: { interests } });
+  if (existingUser) {
+    const tokens = await issueTokensForUser(existingUser.id);
+    return res.json({
+      status: 'success',
+      data: {
+        user: existingUser,
+        ...tokens,
+        next: 'home'
+      }
+    });
+  }
+
+  const oauthSession = await prisma.oauthSignupSession.create({
+    data: {
+      provider: 'google',
+      providerSub: googleSub,
+      email: payload?.email ?? null,
+      displayName: payload?.name ?? null,
+      givenName: payload?.given_name ?? null,
+      familyName: payload?.family_name ?? null,
+      picture: payload?.picture ?? null,
+      expiresAt: new Date(Date.now() + OAUTH_SESSION_TTL_MS)
+    }
+  });
+
+  return res.status(201).json({
+    status: 'success',
+    data: {
+      oauthSessionId: String(oauthSession.id),
+      next: 'complete_profile',
+      profile: {
+        email: payload?.email ?? null,
+        displayName: payload?.name ?? null,
+        givenName: payload?.given_name ?? null,
+        familyName: payload?.family_name ?? null,
+        picture: payload?.picture ?? null
+      }
+    }
+  });
+});
+
+exports.googleCompleteProfile = catchAsync(async (req, res) => {
+  const {
+    oauthSessionId,
+    phone,
+    firstName,
+    lastName,
+    gender,
+    dob,
+    bio,
+    height,
+    ethnicity,
+    interests,
+    photos
+  } = parseBody(
+    z.object({
+      oauthSessionId: z.string().min(1),
+      phone: z.string().min(7).max(20),
+      firstName: z.string().min(1).max(80),
+      lastName: z.string().min(1).max(80),
+      gender: z.enum(['male', 'female', 'other']),
+      dob: z.string().min(4),
+      bio: z.string().max(500).optional(),
+      height: z.number().min(50).max(300).optional(),
+      ethnicity: z.string().max(80).optional(),
+      interests: z.array(z.string()).min(3).max(5),
+      photos: z.array(z.string().min(1)).min(1).max(4)
+    }),
+    req
+  );
+
+  const session = await prisma.oauthSignupSession.findUnique({
+    where: { id: oauthSessionId }
+  });
+  if (!session) throw new AppError('OAuth signup session not found', 404);
+  if (new Date(session.expiresAt).getTime() < Date.now()) throw new AppError('OAuth signup session expired', 400);
+  if (session.usedAt) throw new AppError('OAuth signup session already used', 409);
+  if (session.provider !== 'google') throw new AppError('Invalid OAuth provider', 400);
+
+  const dobDate = new Date(dob);
+  if (Number.isNaN(dobDate.getTime())) throw new AppError('Invalid dob', 400);
+
+  const foundInterests = await prisma.interest.findMany({
+    where: { name: { in: interests } },
+    select: { id: true, name: true }
+  });
+  const foundNames = new Set(foundInterests.map((i) => i.name));
+  const invalid = interests.filter((i) => !foundNames.has(i));
+  if (invalid.length) throw new AppError(`Invalid interests: ${invalid.join(', ')}`, 400);
+  const uniqueInterests = [...new Set(interests)];
+  if (uniqueInterests.length < 3 || uniqueInterests.length > 5) {
+    throw new AppError('Select min 3 and max 5 unique interests', 400);
+  }
+
+  const existingPhone = await prisma.user.findUnique({ where: { phone } });
+  if (existingPhone) throw new AppError('Phone is already registered. Please login.', 409);
+
+  const user = await prisma.user.create({
+    data: {
+      phone,
+      firstName,
+      lastName,
+      gender,
+      dob: dobDate,
+      bio: bio ?? null,
+      height: height == null ? null : Math.round(height),
+      ethnicity: ethnicity ?? null,
+      photos,
+      email: session.email,
+      googleSub: session.providerSub,
+      interests: {
+        create: foundInterests
+          .filter((i) => uniqueInterests.includes(i.name))
+          .map((i) => ({
+            interestId: i.id
+          }))
+      }
+    },
+    include: {
+      interests: { include: { interest: true } }
+    }
+  });
+
+  await prisma.oauthSignupSession.update({
+    where: { id: session.id },
+    data: { usedAt: new Date() }
+  });
+
+  const tokens = await issueTokensForUser(user.id);
+  return res.status(201).json({
+    status: 'success',
+    data: {
+      user,
+      ...tokens,
+      next: 'home'
+    }
+  });
 });
 

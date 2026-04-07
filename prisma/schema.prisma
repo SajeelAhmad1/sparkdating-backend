@@ -10,6 +10,8 @@ datasource db {
 model User {
   id        String   @id @default(auto()) @map("_id") @db.ObjectId
   phone     String   @unique
+  email     String?
+  googleSub String?
   firstName String
   lastName  String
   gender    String
@@ -73,6 +75,25 @@ model RefreshToken {
   updatedAt DateTime @updatedAt
 
   @@index([userId])
+  @@index([expiresAt])
+}
+
+model OauthSignupSession {
+  id          String   @id @default(auto()) @map("_id") @db.ObjectId
+  provider    String
+  providerSub String
+  email       String?
+  displayName String?
+  givenName   String?
+  familyName  String?
+  picture     String?
+  expiresAt   DateTime
+  usedAt      DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([provider, providerSub])
   @@index([expiresAt])
 }
 
