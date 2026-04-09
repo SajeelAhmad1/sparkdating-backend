@@ -1,8 +1,10 @@
-const { z } = require('zod');
-
 const catchAsync = require('../utils/catchAsync');
 const AppError = require('../utils/appError');
 const { generateOtp4 } = require('../utils/otp');
+const { parseBody } = require('../utils/validation');
+const { AUTH_VALIDATION } = require('../validations/auth.validation');
+const { AUTH_ERRORS } = require('../errors/auth.errors');
+const { PROFILE_ERRORS } = require('../errors/profile.errors');
 const {
   signAccessToken,
   signRefreshToken,
@@ -15,12 +17,22 @@ const bcrypt = require('bcryptjs');
 
 const OTP_TTL_MS = 5 * 60 * 1000;
 
-function parseBody(schema, req) {
-  const result = schema.safeParse(req.body);
-  if (!result.success) {
-    throw new AppError(result.error.issues.map((i) => i.message).join(', '), 400);
-  }
-  return result.data;
+function normalizeContact(data) {
+  if (data.email) return { email: data.email.trim().toLowerCase() };
+  return { phone: data.phone.trim() };
+}
+
+function buildContactWhere(contact) {
+  return contact.email ? { email: contact.email } : { phone: contact.phone };
+}
+
+function resolvePasswordLoginWhere(data) {
+  if (data.email) return { email: data.email.trim().toLowerCase() };
+  if (data.phone) return { phone: data.phone.trim() };
+
+  const identifier = data.identifier.trim();
+  const isEmail = identifier.includes('@');
+  return isEmail ? { email: identifier.toLowerCase() } : { phone: identifier };
 }
 
 async function issueTokensForUser(userId) {
@@ -42,27 +54,21 @@ async function issueTokensForUser(userId) {
 }
 
 exports.signupStart = catchAsync(async (req, res) => {
-  const { phone } = parseBody(
-    z.object({
-      phone: z.string().min(7).max(20)
-    }),
-    req
-  );
-
-  const existing = await prisma.user.findFirst({ where: { phone } });
-  if (existing) throw new AppError('Phone is already registered. Please login.', 409);
+  const contact = normalizeContact(parseBody(AUTH_VALIDATION.signupStart, req));
+  const existing = await prisma.user.findFirst({ where: buildContactWhere(contact) });
+  if (existing) throw new AppError(AUTH_ERRORS.ACCOUNT_EXISTS, 409);
 
   const otp = generateOtp4();
   const otpHash = sha256(otp);
   const otpExpiresAt = new Date(Date.now() + OTP_TTL_MS);
 
   const session = await prisma.signupSession.create({
-    data: { phone, otpHash, otpExpiresAt }
+    data: { ...contact, otpHash, otpExpiresAt }
   });
 
   // For now we mock SMS delivery.
   // eslint-disable-next-line no-console
-  console.log(`[MOCK SMS] OTP for ${phone}: ${otp}`);
+  console.log(`[MOCK OTP] Signup OTP for ${contact.email ?? contact.phone}: ${otp}`);
 
   res.status(201).json({
     status: 'success',
@@ -74,24 +80,18 @@ exports.signupStart = catchAsync(async (req, res) => {
 });
 
 exports.signupVerifyOtp = catchAsync(async (req, res) => {
-  const { phone, code, signupSessionId } = parseBody(
-    z.object({
-      phone: z.string().min(7).max(20),
-      code: z.string().regex(/^\d{4}$/, 'Code must be 4 digits'),
-      signupSessionId: z.string().min(1)
-    }),
-    req
-  );
+  const { code, signupSessionId, ...rawContact } = parseBody(AUTH_VALIDATION.signupVerifyOtp, req);
+  const contact = normalizeContact(rawContact);
 
   const session = await prisma.signupSession.findFirst({
-    where: { id: signupSessionId, phone }
+    where: { id: signupSessionId, ...buildContactWhere(contact) }
   });
-  if (!session) throw new AppError('Signup session not found', 404);
-  if (session.otpVerifiedAt) throw new AppError('OTP already verified', 409);
-  if (session.usedAt) throw new AppError('Signup session already used', 409);
-  if (new Date(session.otpExpiresAt).getTime() < Date.now()) throw new AppError('OTP expired', 400);
+  if (!session) throw new AppError(AUTH_ERRORS.SIGNUP_SESSION_NOT_FOUND, 404);
+  if (session.otpVerifiedAt) throw new AppError(AUTH_ERRORS.OTP_ALREADY_VERIFIED, 409);
+  if (session.usedAt) throw new AppError(AUTH_ERRORS.SIGNUP_SESSION_ALREADY_USED, 409);
+  if (new Date(session.otpExpiresAt).getTime() < Date.now()) throw new AppError(AUTH_ERRORS.OTP_EXPIRED, 400);
 
-  if (sha256(code) !== session.otpHash) throw new AppError('Invalid code', 400);
+  if (sha256(code) !== session.otpHash) throw new AppError(AUTH_ERRORS.INVALID_CODE, 400);
   await prisma.signupSession.update({
     where: { id: session.id },
     data: { otpVerifiedAt: new Date() }
@@ -107,31 +107,25 @@ exports.signupVerifyOtp = catchAsync(async (req, res) => {
 });
 
 exports.signupSetPassword = catchAsync(async (req, res) => {
-  const { signupSessionId, phone, password } = parseBody(
-    z.object({
-      signupSessionId: z.string().min(1),
-      phone: z.string().min(7).max(20),
-      password: z.string().min(6).max(100)
-    }),
-    req
-  );
+  const { signupSessionId, password, ...rawContact } = parseBody(AUTH_VALIDATION.signupSetPassword, req);
+  const contact = normalizeContact(rawContact);
 
   const session = await prisma.signupSession.findFirst({
-    where: { id: signupSessionId, phone }
+    where: { id: signupSessionId, ...buildContactWhere(contact) }
   });
-  if (!session) throw new AppError('Signup session not found', 404);
-  if (!session.otpVerifiedAt) throw new AppError('OTP not verified', 403);
-  if (session.usedAt) throw new AppError('Signup session already used', 409);
-  if (new Date(session.otpExpiresAt).getTime() < Date.now()) throw new AppError('OTP expired', 400);
+  if (!session) throw new AppError(AUTH_ERRORS.SIGNUP_SESSION_NOT_FOUND, 404);
+  if (!session.otpVerifiedAt) throw new AppError(AUTH_ERRORS.OTP_NOT_VERIFIED, 403);
+  if (session.usedAt) throw new AppError(AUTH_ERRORS.SIGNUP_SESSION_ALREADY_USED, 409);
+  if (new Date(session.otpExpiresAt).getTime() < Date.now()) throw new AppError(AUTH_ERRORS.OTP_EXPIRED, 400);
 
-  const existing = await prisma.user.findFirst({ where: { phone } });
-  if (existing) throw new AppError('Phone is already registered. Please login.', 409);
+  const existing = await prisma.user.findFirst({ where: buildContactWhere(contact) });
+  if (existing) throw new AppError(AUTH_ERRORS.ACCOUNT_EXISTS, 409);
 
   const passwordHash = await bcrypt.hash(password, 12);
 
   const user = await prisma.user.create({
     data: {
-      phone,
+      ...contact,
       passwordHash
     }
   });
@@ -153,43 +147,37 @@ exports.signupSetPassword = catchAsync(async (req, res) => {
 });
 
 exports.loginStart = catchAsync(async (req, res) => {
-  const { phone } = parseBody(z.object({ phone: z.string().min(7).max(20) }), req);
+  const contact = normalizeContact(parseBody(AUTH_VALIDATION.loginStart, req));
 
-  const user = await prisma.user.findFirst({ where: { phone } });
-  if (!user) throw new AppError('User not found. Please signup.', 404);
+  const user = await prisma.user.findFirst({ where: buildContactWhere(contact) });
+  if (!user) throw new AppError(AUTH_ERRORS.USER_NOT_FOUND, 404);
 
   const otp = generateOtp4();
   const otpHash = sha256(otp);
   const otpExpiresAt = new Date(Date.now() + OTP_TTL_MS);
 
   const session = await prisma.signupSession.create({
-    data: { phone, otpHash, otpExpiresAt }
+    data: { ...contact, otpHash, otpExpiresAt }
   });
   // eslint-disable-next-line no-console
-  console.log(`[MOCK SMS] Login OTP for ${phone}: ${otp}`);
+  console.log(`[MOCK OTP] Login OTP for ${contact.email ?? contact.phone}: ${otp}`);
 
   res.status(201).json({ status: 'success', data: { loginSessionId: String(session.id), next: 'enter_otp' } });
 });
 
 exports.loginVerifyOtp = catchAsync(async (req, res) => {
-  const { phone, code, loginSessionId } = parseBody(
-    z.object({
-      phone: z.string().min(7).max(20),
-      code: z.string().regex(/^\d{4}$/),
-      loginSessionId: z.string().min(1)
-    }),
-    req
-  );
+  const { code, loginSessionId, ...rawContact } = parseBody(AUTH_VALIDATION.loginVerifyOtp, req);
+  const contact = normalizeContact(rawContact);
 
   const session = await prisma.signupSession.findFirst({
-    where: { id: loginSessionId, phone }
+    where: { id: loginSessionId, ...buildContactWhere(contact) }
   });
-  if (!session) throw new AppError('Login session not found', 404);
-  if (new Date(session.otpExpiresAt).getTime() < Date.now()) throw new AppError('OTP expired', 400);
-  if (sha256(code) !== session.otpHash) throw new AppError('Invalid code', 400);
+  if (!session) throw new AppError(AUTH_ERRORS.LOGIN_SESSION_NOT_FOUND, 404);
+  if (new Date(session.otpExpiresAt).getTime() < Date.now()) throw new AppError(AUTH_ERRORS.OTP_EXPIRED, 400);
+  if (sha256(code) !== session.otpHash) throw new AppError(AUTH_ERRORS.INVALID_CODE, 400);
 
-  const user = await prisma.user.findFirst({ where: { phone } });
-  if (!user) throw new AppError('User not found. Please signup.', 404);
+  const user = await prisma.user.findFirst({ where: buildContactWhere(contact) });
+  if (!user) throw new AppError(AUTH_ERRORS.USER_NOT_FOUND, 404);
 
   const tokens = await issueTokensForUser(user.id);
 
@@ -197,45 +185,37 @@ exports.loginVerifyOtp = catchAsync(async (req, res) => {
 });
 
 exports.loginWithPassword = catchAsync(async (req, res) => {
-  const { identifier, password } = parseBody(
-    z.object({
-      identifier: z.string().min(3).max(120),
-      password: z.string().min(1).max(100)
-    }),
-    req
-  );
-
-  const isEmail = identifier.includes('@');
-  const where = isEmail ? { email: identifier } : { phone: identifier };
+  const { password, ...loginInput } = parseBody(AUTH_VALIDATION.loginWithPassword, req);
+  const where = resolvePasswordLoginWhere(loginInput);
 
   const user = await prisma.user.findFirst({
     where,
     include: { profile: true, interests: { include: { interest: true } } }
   });
-  if (!user) throw new AppError('Invalid credentials', 401);
-  if (!user.passwordHash) throw new AppError('Password login not enabled for this account', 401);
+  if (!user) throw new AppError(AUTH_ERRORS.INVALID_CREDENTIALS, 401);
+  if (!user.passwordHash) throw new AppError(AUTH_ERRORS.PASSWORD_LOGIN_NOT_ENABLED, 401);
 
   const ok = await bcrypt.compare(password, user.passwordHash);
-  if (!ok) throw new AppError('Invalid credentials', 401);
+  if (!ok) throw new AppError(AUTH_ERRORS.INVALID_CREDENTIALS, 401);
 
   const tokens = await issueTokensForUser(user.id);
   return res.json({ status: 'success', data: { user, ...tokens, next: user.profile ? 'home' : 'complete_profile' } });
 });
 
 exports.refresh = catchAsync(async (req, res) => {
-  const { refreshToken } = parseBody(z.object({ refreshToken: z.string().min(10) }), req);
+  const { refreshToken } = parseBody(AUTH_VALIDATION.refresh, req);
 
   let decoded;
   try {
     decoded = verifyRefreshToken(refreshToken);
   } catch {
-    throw new AppError('Invalid refresh token', 401);
+    throw new AppError(AUTH_ERRORS.INVALID_REFRESH_TOKEN, 401);
   }
 
   const tokenHash = sha256(refreshToken);
   const existing = await prisma.refreshToken.findUnique({ where: { tokenHash } });
-  if (!existing || existing.revokedAt) throw new AppError('Refresh token revoked', 401);
-  if (new Date(existing.expiresAt).getTime() < Date.now()) throw new AppError('Refresh token expired', 401);
+  if (!existing || existing.revokedAt) throw new AppError(AUTH_ERRORS.REFRESH_TOKEN_REVOKED, 401);
+  if (new Date(existing.expiresAt).getTime() < Date.now()) throw new AppError(AUTH_ERRORS.REFRESH_TOKEN_EXPIRED, 401);
 
   // rotation: revoke old, issue new
   await prisma.refreshToken.update({
@@ -244,14 +224,14 @@ exports.refresh = catchAsync(async (req, res) => {
   });
 
   const user = await prisma.user.findUnique({ where: { id: String(decoded.sub) } });
-  if (!user) throw new AppError('User not found', 404);
+  if (!user) throw new AppError(AUTH_ERRORS.USER_NOT_FOUND, 404);
 
   const tokens = await issueTokensForUser(user.id);
   res.json({ status: 'success', data: { ...tokens } });
 });
 
 exports.logout = catchAsync(async (req, res) => {
-  const { refreshToken } = parseBody(z.object({ refreshToken: z.string().min(10) }), req);
+  const { refreshToken } = parseBody(AUTH_VALIDATION.logout, req);
   const tokenHash = sha256(refreshToken);
   const existing = await prisma.refreshToken.findUnique({ where: { tokenHash } });
   if (existing && !existing.revokedAt)
@@ -260,10 +240,10 @@ exports.logout = catchAsync(async (req, res) => {
 });
 
 exports.googleVerify = catchAsync(async (req, res) => {
-  const { idToken } = parseBody(z.object({ idToken: z.string().min(50) }), req);
+  const { idToken } = parseBody(AUTH_VALIDATION.googleVerify, req);
 
   if (!process.env.GOOGLE_CLIENT_ID) {
-    throw new AppError('GOOGLE_CLIENT_ID is not configured', 500);
+    throw new AppError(AUTH_ERRORS.GOOGLE_CLIENT_ID_MISSING, 500);
   }
 
   // Lazy-load so non-google flows don't require the dependency at runtime.
@@ -279,11 +259,11 @@ exports.googleVerify = catchAsync(async (req, res) => {
     });
     payload = ticket.getPayload();
   } catch {
-    throw new AppError('Invalid Google token', 401);
+    throw new AppError(AUTH_ERRORS.INVALID_GOOGLE_TOKEN, 401);
   }
 
   const googleSub = payload?.sub;
-  if (!googleSub) throw new AppError('Google token missing subject', 401);
+  if (!googleSub) throw new AppError(AUTH_ERRORS.GOOGLE_TOKEN_SUBJECT_MISSING, 401);
 
   const existingUser = await prisma.user.findFirst({
     where: { googleSub },
@@ -321,27 +301,17 @@ exports.googleVerify = catchAsync(async (req, res) => {
 
 exports.completeProfile = catchAsync(async (req, res) => {
   const { firstName, lastName, gender, dob, bio, height, ethnicity, interests, photos } = parseBody(
-    z.object({
-      firstName: z.string().min(1).max(80),
-      lastName: z.string().min(1).max(80),
-      gender: z.enum(['male', 'female', 'other']),
-      dob: z.string().min(4),
-      bio: z.string().max(500).optional(),
-      height: z.number().min(50).max(300).optional(),
-      ethnicity: z.string().max(80).optional(),
-      interests: z.array(z.string()).min(3).max(5),
-      photos: z.array(z.string().min(1)).min(1).max(4)
-    }),
+    AUTH_VALIDATION.completeProfile,
     req
   );
 
   const userId = String(req.user.id);
 
   const existingProfile = await prisma.profile.findUnique({ where: { userId } });
-  if (existingProfile) throw new AppError('Profile already exists', 409);
+  if (existingProfile) throw new AppError(PROFILE_ERRORS.ALREADY_EXISTS, 409);
 
   const dobDate = new Date(dob);
-  if (Number.isNaN(dobDate.getTime())) throw new AppError('Invalid dob', 400);
+  if (Number.isNaN(dobDate.getTime())) throw new AppError(PROFILE_ERRORS.INVALID_DOB, 400);
 
   const foundInterests = await prisma.interest.findMany({
     where: { name: { in: interests } },
@@ -349,10 +319,10 @@ exports.completeProfile = catchAsync(async (req, res) => {
   });
   const foundNames = new Set(foundInterests.map((i) => i.name));
   const invalid = interests.filter((i) => !foundNames.has(i));
-  if (invalid.length) throw new AppError(`Invalid interests: ${invalid.join(', ')}`, 400);
+  if (invalid.length) throw new AppError(`${PROFILE_ERRORS.INVALID_INTERESTS_PREFIX} ${invalid.join(', ')}`, 400);
   const uniqueInterests = [...new Set(interests)];
   if (uniqueInterests.length < 3 || uniqueInterests.length > 5) {
-    throw new AppError('Select min 3 and max 5 unique interests', 400);
+    throw new AppError(PROFILE_ERRORS.UNIQUE_INTERESTS_RANGE, 400);
   }
 
   const user = await prisma.user.update({
@@ -389,6 +359,77 @@ exports.completeProfile = catchAsync(async (req, res) => {
     data: {
       user,
       next: 'home'
+    }
+  });
+});
+
+exports.editProfile = catchAsync(async (req, res) => {
+  const payload = parseBody(AUTH_VALIDATION.editProfile, req);
+  if (!Object.keys(payload).length) throw new AppError(PROFILE_ERRORS.UPDATE_FIELDS_REQUIRED, 400);
+
+  const userId = String(req.user.id);
+  const existingProfile = await prisma.profile.findUnique({ where: { userId } });
+  if (!existingProfile) throw new AppError(PROFILE_ERRORS.NOT_FOUND, 404);
+
+  const profileUpdateData = {};
+  if (payload.firstName !== undefined) profileUpdateData.firstName = payload.firstName;
+  if (payload.lastName !== undefined) profileUpdateData.lastName = payload.lastName;
+  if (payload.gender !== undefined) profileUpdateData.gender = payload.gender;
+  if (payload.bio !== undefined) profileUpdateData.bio = payload.bio;
+  if (payload.ethnicity !== undefined) profileUpdateData.ethnicity = payload.ethnicity;
+  if (payload.photos !== undefined) profileUpdateData.photos = payload.photos;
+  if (payload.height !== undefined) profileUpdateData.height = Math.round(payload.height);
+
+  if (payload.dob !== undefined) {
+    const dobDate = new Date(payload.dob);
+    if (Number.isNaN(dobDate.getTime())) throw new AppError(PROFILE_ERRORS.INVALID_DOB, 400);
+    profileUpdateData.dob = dobDate;
+  }
+
+  let nextInterestsData;
+  if (payload.interests !== undefined) {
+    const foundInterests = await prisma.interest.findMany({
+      where: { name: { in: payload.interests } },
+      select: { id: true, name: true }
+    });
+    const foundNames = new Set(foundInterests.map((i) => i.name));
+    const invalid = payload.interests.filter((i) => !foundNames.has(i));
+    if (invalid.length) throw new AppError(`${PROFILE_ERRORS.INVALID_INTERESTS_PREFIX} ${invalid.join(', ')}`, 400);
+
+    const uniqueInterests = [...new Set(payload.interests)];
+    if (uniqueInterests.length < 3 || uniqueInterests.length > 5) {
+      throw new AppError(PROFILE_ERRORS.UNIQUE_INTERESTS_RANGE, 400);
+    }
+
+    nextInterestsData = foundInterests
+      .filter((interest) => uniqueInterests.includes(interest.name))
+      .map((interest) => ({ interestId: interest.id }));
+  }
+
+  const data = {};
+  if (Object.keys(profileUpdateData).length > 0) {
+    data.profile = { update: profileUpdateData };
+  }
+  if (nextInterestsData) {
+    data.interests = {
+      deleteMany: {},
+      create: nextInterestsData
+    };
+  }
+
+  const user = await prisma.user.update({
+    where: { id: userId },
+    data,
+    include: {
+      profile: true,
+      interests: { include: { interest: true } }
+    }
+  });
+
+  return res.json({
+    status: 'success',
+    data: {
+      user
     }
   });
 });

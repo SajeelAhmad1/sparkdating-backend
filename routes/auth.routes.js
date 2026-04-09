@@ -1,5 +1,6 @@
 const express = require('express');
 const authController = require('../controllers/auth.controller');
+const protect = require('../middlewares/protect');
 
 const router = express.Router();
 
@@ -10,6 +11,7 @@ router.post('/signup/set-password', authController.signupSetPassword);
 
 // Google Auth (verify token -> complete profile)
 router.post('/google/verify', authController.googleVerify);
+router.post('/complete-profile', protect, authController.completeProfile);
 
 // Login (phone OTP)
 router.post('/login', authController.loginWithPassword);

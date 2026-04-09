@@ -65,7 +65,8 @@ model UserInterest {
 
 model SignupSession {
   id            String   @id @default(auto()) @map("_id") @db.ObjectId
-  phone         String
+  phone         String?
+  email         String?
   otpHash       String
   otpExpiresAt  DateTime
   otpVerifiedAt DateTime?
@@ -75,6 +76,7 @@ model SignupSession {
   updatedAt DateTime @updatedAt
 
   @@index([phone])
+  @@index([email])
   @@index([otpExpiresAt])
   @@index([usedAt])
 }

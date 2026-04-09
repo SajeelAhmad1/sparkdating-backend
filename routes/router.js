@@ -11,6 +11,7 @@ router.use('/auth', authRoutes);
 router.use('/interests', protect, interestsRoutes);
 
 router.post('/profile/complete', protect, authController.completeProfile);
+router.patch('/profile/edit', protect, authController.editProfile);
 router.get('/me', protect, userController.me);
 
 module.exports = router;
