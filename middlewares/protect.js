@@ -19,7 +19,7 @@ module.exports = catchAsync(async (req, res, next) => {
 
   const user = await prisma.user.findUnique({
     where: { id: String(decoded.sub) },
-    include: { interests: { include: { interest: true } } }
+    include: { profile: true, interests: { include: { interest: true } } }
   });
   if (!user) return next(new AppError('User not found', 404));
 
