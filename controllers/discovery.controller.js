@@ -28,6 +28,22 @@ function normalizePair(a, b) {
   return String(a) < String(b) ? [String(a), String(b)] : [String(b), String(a)];
 }
 
+async function getActiveDiscoveryFilter() {
+  const filter = await prisma.discoveryFilter.findFirst({
+    where: { key: 'default', isActive: true }
+  });
+  if (filter) return filter;
+  return prisma.discoveryFilter.create({
+    data: {
+      key: 'default',
+      youngerAgeDelta: 5,
+      olderAgeDelta: 5,
+      maxDistanceKm: 50,
+      isActive: true
+    }
+  });
+}
+
 let indexInitPromise = null;
 async function ensureGeoIndexes() {
   if (!indexInitPromise) {
@@ -108,13 +124,16 @@ exports.updateLocation = catchAsync(async (req, res) => {
 });
 
 exports.discoverProfiles = catchAsync(async (req, res) => {
-  const { lat, lng, maxDistanceKm, minAge, maxAge, limit } = parseBody(DISCOVERY_VALIDATION.discoverProfiles, req);
+  const { lat, lng, limit } = parseBody(DISCOVERY_VALIDATION.discoverProfiles, req);
   const me = req.user;
   const myUserId = String(me.id);
   const myGender = me.profile?.gender;
 
   if (!me.profile) throw new AppError(DISCOVERY_ERRORS.PROFILE_REQUIRED, 403);
-  if (minAge > maxAge) throw new AppError('minAge cannot be greater than maxAge', 400);
+  const discoveryFilter = await getActiveDiscoveryFilter();
+  const myAge = calculateAge(me.profile.dob);
+  const minAge = Math.max(18, myAge - discoveryFilter.youngerAgeDelta);
+  const maxAge = Math.max(minAge, myAge + discoveryFilter.olderAgeDelta);
   const now = new Date();
   const youngestDob = new Date(Date.UTC(now.getUTCFullYear() - minAge, now.getUTCMonth(), now.getUTCDate()));
   const oldestDob = new Date(Date.UTC(now.getUTCFullYear() - maxAge, now.getUTCMonth(), now.getUTCDate()));
@@ -133,7 +152,7 @@ exports.discoverProfiles = catchAsync(async (req, res) => {
       point: {
         $near: {
           $geometry: { type: 'Point', coordinates: [lng, lat] },
-          $maxDistance: Math.round(maxDistanceKm * 1000)
+          $maxDistance: Math.round(discoveryFilter.maxDistanceKm * 1000)
         }
       },
       userId: { $ne: toObjectId(myUserId) }
@@ -208,6 +227,12 @@ exports.discoverProfiles = catchAsync(async (req, res) => {
     status: 'success',
     data: {
       area,
+      appliedFilter: {
+        maxDistanceKm: discoveryFilter.maxDistanceKm,
+        minAge,
+        maxAge,
+        basedOnMyAge: myAge
+      },
       profiles
     }
   });
@@ -216,7 +241,7 @@ exports.discoverProfiles = catchAsync(async (req, res) => {
 exports.swipe = catchAsync(async (req, res) => {
   const { toUserId, action } = parseBody(DISCOVERY_VALIDATION.swipe, req);
   const fromUserId = String(req.user.id);
-  if (!['like', 'pass', 'super_like'].includes(action)) throw new AppError(DISCOVERY_ERRORS.SWIPE_ACTION_INVALID, 400);
+  if (!['like', 'swipe'].includes(action)) throw new AppError(DISCOVERY_ERRORS.SWIPE_ACTION_INVALID, 400);
   if (toUserId === fromUserId) throw new AppError(DISCOVERY_ERRORS.SELF_SWIPE_NOT_ALLOWED, 400);
 
   const target = await prisma.user.findUnique({
@@ -243,7 +268,7 @@ exports.swipe = catchAsync(async (req, res) => {
   });
 
   let match = null;
-  const isPositive = action === 'like' || action === 'super_like';
+  const isPositive = action === 'like';
   if (isPositive) {
     const reverseSwipe = await prisma.swipe.findUnique({
       where: {
@@ -254,7 +279,7 @@ exports.swipe = catchAsync(async (req, res) => {
       }
     });
 
-    if (reverseSwipe && (reverseSwipe.action === 'like' || reverseSwipe.action === 'super_like')) {
+    if (reverseSwipe && reverseSwipe.action === 'like') {
       const [user1Id, user2Id] = normalizePair(fromUserId, String(toUserId));
       match = await prisma.match.upsert({
         where: { user1Id_user2Id: { user1Id, user2Id } },

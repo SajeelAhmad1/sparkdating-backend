@@ -69,6 +69,23 @@ async function main() {
       }
     });
   }
+
+  await prisma.discoveryFilter.upsert({
+    where: { key: 'default' },
+    create: {
+      key: 'default',
+      youngerAgeDelta: 5,
+      olderAgeDelta: 5,
+      maxDistanceKm: 50,
+      isActive: true
+    },
+    update: {
+      youngerAgeDelta: 5,
+      olderAgeDelta: 5,
+      maxDistanceKm: 50,
+      isActive: true
+    }
+  });
 }
 
 main()
