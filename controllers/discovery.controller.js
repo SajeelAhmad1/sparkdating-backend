@@ -3,7 +3,10 @@ const AppError = require('../utils/appError');
 const { parseBody } = require('../utils/validation');
 const prisma = require('../utils/prisma');
 const { DISCOVERY_VALIDATION } = require('../validations/discovery.validation');
+const { DISCOVERY_PREFERENCES_VALIDATION } = require('../validations/discovery-preferences.validation');
 const { DISCOVERY_ERRORS } = require('../errors/discovery.errors');
+const { SOCIAL_ERRORS } = require('../errors/social.errors');
+const { isBlockedEitherWay } = require('./social.controller');
 
 function toObjectId(id) {
   return { $oid: String(id) };
@@ -28,20 +31,11 @@ function normalizePair(a, b) {
   return String(a) < String(b) ? [String(a), String(b)] : [String(b), String(a)];
 }
 
-async function getActiveDiscoveryFilter() {
-  const filter = await prisma.discoveryFilter.findFirst({
-    where: { key: 'default', isActive: true }
-  });
-  if (filter) return filter;
-  return prisma.discoveryFilter.create({
-    data: {
-      key: 'default',
-      youngerAgeDelta: 5,
-      olderAgeDelta: 5,
-      maxDistanceKm: 50,
-      isActive: true
-    }
-  });
+function discoveryPrefsFromUser(user) {
+  const youngerAgeDelta = user.youngerAgeDelta ?? 5;
+  const olderAgeDelta = user.olderAgeDelta ?? 5;
+  const maxDistanceKm = user.maxDistanceKm ?? 50;
+  return { youngerAgeDelta, olderAgeDelta, maxDistanceKm };
 }
 
 let indexInitPromise = null;
@@ -130,7 +124,7 @@ exports.discoverProfiles = catchAsync(async (req, res) => {
   const myGender = me.profile?.gender;
 
   if (!me.profile) throw new AppError(DISCOVERY_ERRORS.PROFILE_REQUIRED, 403);
-  const discoveryFilter = await getActiveDiscoveryFilter();
+  const discoveryFilter = discoveryPrefsFromUser(me);
   const myAge = calculateAge(me.profile.dob);
   const minAge = Math.max(18, myAge - discoveryFilter.youngerAgeDelta);
   const maxAge = Math.max(minAge, myAge + discoveryFilter.olderAgeDelta);
@@ -164,6 +158,19 @@ exports.discoverProfiles = catchAsync(async (req, res) => {
   if (!nearbyUserIds.length) {
     return res.json({ status: 'success', data: { area, profiles: [] } });
   }
+
+  const blockRows = await prisma.userBlock.findMany({
+    where: {
+      OR: [{ blockerId: myUserId }, { blockedUserId: myUserId }]
+    },
+    select: { blockerId: true, blockedUserId: true }
+  });
+  const blockedUserIds = new Set();
+  blockRows.forEach((b) => {
+    blockedUserIds.add(String(b.blockerId));
+    blockedUserIds.add(String(b.blockedUserId));
+  });
+  blockedUserIds.delete(myUserId);
 
   const [mySwipes, myMatches, candidates] = await Promise.all([
     prisma.swipe.findMany({ where: { fromUserId: myUserId }, select: { toUserId: true } }),
@@ -205,6 +212,7 @@ exports.discoverProfiles = catchAsync(async (req, res) => {
 
   const profiles = candidates
     .filter((user) => !excluded.has(String(user.id)))
+    .filter((user) => !blockedUserIds.has(String(user.id)))
     .filter((user) => user.interests.some((ui) => myInterestIds.has(String(ui.interestId))))
     .slice(0, limit)
     .map((user) => {
@@ -238,11 +246,40 @@ exports.discoverProfiles = catchAsync(async (req, res) => {
   });
 });
 
+exports.getDiscoveryPreferences = catchAsync(async (req, res) => {
+  const user = await prisma.user.findUniqueOrThrow({
+    where: { id: String(req.user.id) },
+    select: { youngerAgeDelta: true, olderAgeDelta: true, maxDistanceKm: true }
+  });
+  res.json({
+    status: 'success',
+    data: { preferences: discoveryPrefsFromUser(user) }
+  });
+});
+
+exports.patchDiscoveryPreferences = catchAsync(async (req, res) => {
+  const payload = parseBody(DISCOVERY_PREFERENCES_VALIDATION.update, req);
+  if (!Object.keys(payload).length) throw new AppError('Provide at least one field to update', 400);
+  const user = await prisma.user.update({
+    where: { id: String(req.user.id) },
+    data: payload,
+    select: { youngerAgeDelta: true, olderAgeDelta: true, maxDistanceKm: true }
+  });
+  res.json({
+    status: 'success',
+    data: { preferences: discoveryPrefsFromUser(user) }
+  });
+});
+
 exports.swipe = catchAsync(async (req, res) => {
   const { toUserId, action } = parseBody(DISCOVERY_VALIDATION.swipe, req);
   const fromUserId = String(req.user.id);
   if (!['like', 'swipe'].includes(action)) throw new AppError(DISCOVERY_ERRORS.SWIPE_ACTION_INVALID, 400);
   if (toUserId === fromUserId) throw new AppError(DISCOVERY_ERRORS.SELF_SWIPE_NOT_ALLOWED, 400);
+
+  if (await isBlockedEitherWay(fromUserId, String(toUserId))) {
+    throw new AppError(SOCIAL_ERRORS.CANNOT_SWIPE_BLOCKED_USER, 403);
+  }
 
   const target = await prisma.user.findUnique({
     where: { id: String(toUserId) },
