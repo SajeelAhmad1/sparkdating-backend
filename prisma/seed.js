@@ -29,8 +29,62 @@ async function main() {
     { name: 'Sports', category: 'Lifestyle' }
   ];
 
-  await prisma.interest.createMany({
-    data: interests,
+  for (const interest of interests) {
+    await prisma.interest.upsert({
+      where: { name: interest.name },
+      create: interest,
+      update: { category: interest.category }
+    });
+  }
+
+  const serviceAreas = [
+    {
+      name: 'Netherlands',
+      countryCode: 'NL',
+      // Rough country bounding box polygon.
+      geometry: {
+        type: 'Polygon',
+        coordinates: [[[3.2, 50.7], [7.4, 50.7], [7.4, 53.7], [3.2, 53.7], [3.2, 50.7]]]
+      }
+    },
+    {
+      name: 'Pakistan',
+      countryCode: 'PK',
+      // Rough country bounding box polygon.
+      geometry: {
+        type: 'Polygon',
+        coordinates: [[[60.8, 23.5], [77.9, 23.5], [77.9, 37.2], [60.8, 37.2], [60.8, 23.5]]]
+      }
+    }
+  ];
+
+  for (const area of serviceAreas) {
+    await prisma.serviceArea.upsert({
+      where: { name: area.name },
+      create: { ...area, isActive: true },
+      update: {
+        countryCode: area.countryCode,
+        geometry: area.geometry,
+        isActive: true
+      }
+    });
+  }
+
+  await prisma.discoveryFilter.upsert({
+    where: { key: 'default' },
+    create: {
+      key: 'default',
+      youngerAgeDelta: 5,
+      olderAgeDelta: 5,
+      maxDistanceKm: 50,
+      isActive: true
+    },
+    update: {
+      youngerAgeDelta: 5,
+      olderAgeDelta: 5,
+      maxDistanceKm: 50,
+      isActive: true
+    }
   });
 }
 
