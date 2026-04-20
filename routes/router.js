@@ -16,7 +16,6 @@ router.use('/interests', protect, interestsRoutes);
 router.use('/discovery', protect, discoveryRoutes);
 router.use('/admin/service-areas', protect, serviceAreaRoutes);
 router.use('/admin/discovery-filters', protect, discoveryFilterRoutes);
-router.use('/', protect, socialRoutes);
 
 router.post('/profile/complete', protect, authController.completeProfile);
 router.patch('/profile/edit', protect, authController.editProfile);
