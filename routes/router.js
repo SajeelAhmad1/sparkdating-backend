@@ -10,6 +10,7 @@ const discoveryFilterRoutes = require('./discovery-filter.routes');
 const chatRoutes = require('./chat.routes');
 const socialRoutes = require('./social.routes');
 const fcmRoutes = require('./fcm.routes');
+const usersRoutes = require('./users.routes');
 
 const router = express.Router();
 
@@ -17,6 +18,7 @@ router.use('/auth', authRoutes);
 router.use('/interests', protect, interestsRoutes);
 router.use('/discovery', protect, discoveryRoutes);
 router.use('/chat', protect, chatRoutes);
+router.use('/users', protect, usersRoutes);
 router.use('/admin/service-areas', protect, serviceAreaRoutes);
 router.use('/admin/discovery-filters', protect, discoveryFilterRoutes);
 
