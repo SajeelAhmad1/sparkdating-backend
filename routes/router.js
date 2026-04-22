@@ -9,6 +9,7 @@ const serviceAreaRoutes = require('./service-area.routes');
 const discoveryFilterRoutes = require('./discovery-filter.routes');
 const chatRoutes = require('./chat.routes');
 const socialRoutes = require('./social.routes');
+const fcmRoutes = require('./fcm.routes');
 
 const router = express.Router();
 
@@ -22,6 +23,8 @@ router.use('/admin/discovery-filters', protect, discoveryFilterRoutes);
 router.post('/profile/complete', protect, authController.completeProfile);
 router.patch('/profile/edit', protect, authController.editProfile);
 router.get('/me', protect, userController.me);
+router.use('/me/fcm-token', protect, fcmRoutes);
+router.patch('/me/notification-preferences', protect, userController.updateNotificationPreferences);
 
 module.exports = router;
 

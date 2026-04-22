@@ -3,6 +3,8 @@ const AppError = require('../utils/appError');
 const prisma = require('../utils/prisma');
 const { parseBody, parseQuery } = require('../utils/validation');
 const { CHAT_VALIDATION } = require('../validations/chat.validation');
+const { notifyNewChatMessage } = require('../services/fcmMessaging');
+const { emitMessageNew } = require('../socket/socketServer');
 
 function toPeer(user) {
   return {
@@ -158,7 +160,7 @@ exports.sendMessage = catchAsync(async (req, res) => {
   if (!conversationId) throw new AppError('Conversation id is required', 400);
   const me = String(req.user.id);
 
-  await ensureConversationMember(conversationId, me);
+  const conversation = await ensureConversationMember(conversationId, me);
 
   if (payload.type === 'text' && !payload.text) {
     throw new AppError('Text is required for text message', 400);
@@ -186,6 +188,15 @@ exports.sendMessage = catchAsync(async (req, res) => {
     where: { id: conversationId },
     data: { lastMessageAt: message.createdAt }
   });
+
+  emitMessageNew(conversation.memberIds, conversationId, message);
+
+  notifyNewChatMessage({
+    memberIds: conversation.memberIds,
+    senderId: me,
+    conversationId,
+    message
+  }).catch(() => {});
 
   res.status(201).json({
     status: 'success',

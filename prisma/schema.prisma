@@ -30,6 +30,8 @@ model User {
   blocksReceived   UserBlock[]           @relation("blocks_received")
   requestsSent     ConnectionRequest[]   @relation("requests_sent")
   requestsReceived ConnectionRequest[]   @relation("requests_received")
+  fcmTokens        FcmToken[]
+  fcmNotificationsEnabled Boolean @default(true)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -296,6 +298,19 @@ model ConnectionRequest {
   @@unique([fromUserId, toUserId])
   @@index([toUserId, status])
   @@index([fromUserId, status])
+}
+
+model FcmToken {
+  id     String @id @default(auto()) @map("_id") @db.ObjectId
+  userId String @db.ObjectId
+  token  String @unique
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
 }
 
 model DiscoveryFilter {
