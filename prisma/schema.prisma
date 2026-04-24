@@ -18,6 +18,7 @@ model User {
   youngerAgeDelta Int?
   olderAgeDelta   Int?
   maxDistanceKm   Int?
+  showMe          String[] @default([])
 
   interests UserInterest[]
   profile   Profile?

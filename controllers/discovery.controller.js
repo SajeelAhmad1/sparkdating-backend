@@ -27,6 +27,14 @@ function oppositeGender(gender) {
   return null;
 }
 
+const MI_TO_KM = 1.609344;
+function milesToKmInt(miles) {
+  return Math.max(1, Math.round(Number(miles) * MI_TO_KM));
+}
+function kmToMilesInt(km) {
+  return Math.max(1, Math.round(Number(km) / MI_TO_KM));
+}
+
 function normalizePair(a, b) {
   return String(a) < String(b) ? [String(a), String(b)] : [String(b), String(a)];
 }
@@ -35,7 +43,8 @@ function discoveryPrefsFromUser(user) {
   const youngerAgeDelta = user.youngerAgeDelta ?? 5;
   const olderAgeDelta = user.olderAgeDelta ?? 5;
   const maxDistanceKm = user.maxDistanceKm ?? 50;
-  return { youngerAgeDelta, olderAgeDelta, maxDistanceKm };
+  const showMe = Array.isArray(user.showMe) ? user.showMe.filter(Boolean) : null;
+  return { youngerAgeDelta, olderAgeDelta, maxDistanceKm, maxDistanceMiles: kmToMilesInt(maxDistanceKm), showMe };
 }
 
 let indexInitPromise = null;
@@ -183,7 +192,10 @@ exports.discoverProfiles = catchAsync(async (req, res) => {
         id: { in: nearbyUserIds },
         profile: {
           is: {
-            gender: oppositeGender(myGender) ?? undefined,
+            gender:
+              discoveryFilter.showMe && discoveryFilter.showMe.length
+                ? { in: discoveryFilter.showMe }
+                : oppositeGender(myGender) ?? undefined,
             dob: {
               lte: youngestDob,
               gte: oldestDob
@@ -237,6 +249,7 @@ exports.discoverProfiles = catchAsync(async (req, res) => {
       area,
       appliedFilter: {
         maxDistanceKm: discoveryFilter.maxDistanceKm,
+        maxDistanceMiles: discoveryFilter.maxDistanceMiles,
         minAge,
         maxAge,
         basedOnMyAge: myAge
@@ -249,7 +262,7 @@ exports.discoverProfiles = catchAsync(async (req, res) => {
 exports.getDiscoveryPreferences = catchAsync(async (req, res) => {
   const user = await prisma.user.findUniqueOrThrow({
     where: { id: String(req.user.id) },
-    select: { youngerAgeDelta: true, olderAgeDelta: true, maxDistanceKm: true }
+    select: { youngerAgeDelta: true, olderAgeDelta: true, maxDistanceKm: true, showMe: true }
   });
   res.json({
     status: 'success',
@@ -260,10 +273,16 @@ exports.getDiscoveryPreferences = catchAsync(async (req, res) => {
 exports.patchDiscoveryPreferences = catchAsync(async (req, res) => {
   const payload = parseBody(DISCOVERY_PREFERENCES_VALIDATION.update, req);
   if (!Object.keys(payload).length) throw new AppError('Provide at least one field to update', 400);
+
+  if (payload.maxDistanceMiles != null) {
+    payload.maxDistanceKm = milesToKmInt(payload.maxDistanceMiles);
+    delete payload.maxDistanceMiles;
+  }
+
   const user = await prisma.user.update({
     where: { id: String(req.user.id) },
     data: payload,
-    select: { youngerAgeDelta: true, olderAgeDelta: true, maxDistanceKm: true }
+    select: { youngerAgeDelta: true, olderAgeDelta: true, maxDistanceKm: true, showMe: true }
   });
   res.json({
     status: 'success',

@@ -190,7 +190,7 @@ exports.loginWithPassword = catchAsync(async (req, res) => {
 
   const user = await prisma.user.findFirst({
     where,
-    include: { profile: true, interests: { include: { interest: true } } }
+    include: { profile: true, interests: { include: { interest: true } }, location: { select: { lat: true, lng: true } } }
   });
   if (!user) throw new AppError(AUTH_ERRORS.INVALID_CREDENTIALS, 401);
   if (!user.passwordHash) throw new AppError(AUTH_ERRORS.PASSWORD_LOGIN_NOT_ENABLED, 401);

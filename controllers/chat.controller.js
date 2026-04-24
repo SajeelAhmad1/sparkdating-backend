@@ -110,7 +110,8 @@ exports.listConversations = catchAsync(async (req, res) => {
             id: String(lastMessage.id),
             type: lastMessage.type,
             text: lastMessage.text,
-            media: lastMessage.media,
+            // Prevent viewing snaps from the list screen.
+            media: lastMessage.type === 'streak' ? null : lastMessage.media,
             streakExpiresAt: lastMessage.streakExpiresAt,
             createdAt: lastMessage.createdAt
           }
@@ -144,11 +145,44 @@ exports.listMessages = catchAsync(async (req, res) => {
     take: limit
   });
 
+  // Snap (streak) rules:
+  // - sender can never view it (media always redacted)
+  // - receiver can view it only once (first time we return media, we mark it viewed)
+  // - expired streaks never show media
+  const now = new Date();
+  const toMarkViewed = [];
+  const redacted = messages.map((m) => {
+    if (m.type !== 'streak') return m;
+
+    const isSender = String(m.senderId) === me;
+    const isExpired = m.streakExpiresAt ? new Date(m.streakExpiresAt) <= now : false;
+    const alreadyViewed = Array.isArray(m.streakViewedBy) && m.streakViewedBy.includes(me);
+
+    if (isSender || isExpired || alreadyViewed) {
+      return { ...m, media: null };
+    }
+
+    // Receiver, not viewed yet, not expired: allow exactly once.
+    toMarkViewed.push(String(m.id));
+    return m;
+  });
+
+  if (toMarkViewed.length) {
+    await Promise.all(
+      toMarkViewed.map((id) =>
+        prisma.message.update({
+          where: { id },
+          data: { streakViewedBy: { push: me } }
+        })
+      )
+    );
+  }
+
   const oldest = messages[messages.length - 1] ?? null;
   res.json({
     status: 'success',
     data: {
-      items: messages.reverse(),
+      items: redacted.reverse(),
       nextCursor: oldest ? oldest.createdAt.toISOString() : null
     }
   });
