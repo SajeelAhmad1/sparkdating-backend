@@ -4,7 +4,7 @@ const prisma = require('../utils/prisma');
 const { parseBody, parseQuery } = require('../utils/validation');
 const { CHAT_VALIDATION } = require('../validations/chat.validation');
 const { notifyNewChatMessage } = require('../services/fcmMessaging');
-const { emitMessageNew } = require('../socket/socketServer');
+const { emitMessageNew, getUsersCurrentlyInConversation } = require('../socket/socketServer');
 
 function toPeer(user) {
   return {
@@ -71,7 +71,7 @@ exports.listConversations = catchAsync(async (req, res) => {
   for (const c of conversations) {
     const peerId = c.memberIds.find((id) => id !== me) ?? null;
     // eslint-disable-next-line no-await-in-loop
-    const [peer, lastMessage, readState] = await Promise.all([
+    const [peer, lastMessage, readState, streakCount] = await Promise.all([
       peerId
         ? prisma.user.findUnique({
             where: { id: peerId },
@@ -84,6 +84,15 @@ exports.listConversations = catchAsync(async (req, res) => {
       }),
       prisma.conversationReadState.findUnique({
         where: { conversationId_userId: { conversationId: String(c.id), userId: me } }
+      }),
+      prisma.message.count({
+        where: {
+          conversationId: String(c.id),
+          type: 'streak',
+          senderId: { not: me },
+          streakExpiresAt: { gt: new Date() },
+          streakViewedBy: { hasNone: [me] }
+        }
       })
     ]);
 
@@ -100,11 +109,22 @@ exports.listConversations = catchAsync(async (req, res) => {
       }
     }
 
+    const now = new Date();
+    const ref = lastMessage?.createdAt ?? c.lastMessageAt ?? null;
+    let chatStatus = 'active';
+    if (ref) {
+      const days = (now.getTime() - new Date(ref).getTime()) / (1000 * 60 * 60 * 24);
+      if (days >= 5) chatStatus = 'locked';
+      else if (days >= 3) chatStatus = 'lockingSoon';
+    }
+
     items.push({
       conversationId: String(c.id),
       type: c.type,
       otherUser: peer ? toPeer(peer) : null,
       unreadCount,
+      streakCount,
+      chatStatus,
       lastMessage: lastMessage
         ? {
             id: String(lastMessage.id),
@@ -225,11 +245,35 @@ exports.sendMessage = catchAsync(async (req, res) => {
 
   emitMessageNew(conversation.memberIds, conversationId, message);
 
+  const inRoom = getUsersCurrentlyInConversation(conversationId);
+  const recipients = conversation.memberIds.map(String).filter((id) => id !== String(me));
+  const activeRecipients = recipients.filter((id) => inRoom.has(String(id)));
+  if (activeRecipients.length > 0) {
+    await Promise.all(
+      activeRecipients.map((rid) =>
+        prisma.conversationReadState.upsert({
+          where: { conversationId_userId: { conversationId, userId: String(rid) } },
+          create: {
+            conversationId,
+            userId: String(rid),
+            lastReadMessageId: String(message.id),
+            lastReadAt: message.createdAt
+          },
+          update: {
+            lastReadMessageId: String(message.id),
+            lastReadAt: message.createdAt
+          }
+        })
+      )
+    );
+  }
+
   notifyNewChatMessage({
     memberIds: conversation.memberIds,
     senderId: me,
     conversationId,
-    message
+    message,
+    suppressUserIds: activeRecipients
   }).catch(() => {});
 
   res.status(201).json({

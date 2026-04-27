@@ -4,6 +4,7 @@ const prisma = require('../utils/prisma');
 const { notifyNewChatMessage } = require('../services/fcmMessaging');
 
 let io;
+const onlineSocketCounts = new Map(); // userId -> number of connected sockets
 
 async function ensureConversationMember(conversationId, userId) {
   const cid = String(conversationId ?? '').trim();
@@ -16,6 +17,47 @@ async function ensureConversationMember(conversationId, userId) {
   if (!conversation) return null;
   if (!conversation.memberIds.map(String).includes(uid)) return null;
   return conversation;
+}
+
+function roomNameForConversation(conversationId) {
+  return `conv:${String(conversationId)}`;
+}
+
+function roomNameForUser(userId) {
+  return `user:${String(userId)}`;
+}
+
+function getUsersCurrentlyInConversation(conversationId) {
+  if (!io) return new Set();
+  const room = io.sockets.adapter.rooms.get(roomNameForConversation(conversationId));
+  if (!room || room.size === 0) return new Set();
+
+  const users = new Set();
+  for (const sid of room) {
+    const s = io.sockets.sockets.get(sid);
+    const uid = s?.data?.userId;
+    if (uid) users.add(String(uid));
+  }
+  return users;
+}
+
+async function emitPresenceToPeers(userId, isOnline) {
+  if (!io) return;
+  const me = String(userId);
+  const conversations = await prisma.conversation.findMany({
+    where: { memberIds: { has: me } },
+    select: { memberIds: true }
+  });
+  const peers = new Set();
+  for (const c of conversations) {
+    for (const id of c.memberIds.map(String)) {
+      if (id !== me) peers.add(id);
+    }
+  }
+  const payload = { userId: me, status: isOnline ? 'online' : 'offline' };
+  for (const pid of peers) {
+    io.to(roomNameForUser(pid)).emit('presence:update', payload);
+  }
 }
 
 function initSocket(httpServer) {
@@ -39,7 +81,14 @@ function initSocket(httpServer) {
 
   io.on('connection', (socket) => {
     const userId = socket.data.userId;
-    socket.join(`user:${userId}`);
+    socket.data.joinedConversations = new Set();
+    socket.join(roomNameForUser(userId));
+
+    const prev = onlineSocketCounts.get(String(userId)) ?? 0;
+    onlineSocketCounts.set(String(userId), prev + 1);
+    if (prev === 0) {
+      emitPresenceToPeers(userId, true).catch(() => {});
+    }
 
     // Join the conversation room when opening the thread
     socket.on('conversation:join', async (payload, cb) => {
@@ -48,7 +97,8 @@ function initSocket(httpServer) {
         if (!conversationId) throw new Error('conversationId required');
         const conv = await ensureConversationMember(conversationId, userId);
         if (!conv) throw new Error('Forbidden');
-        await socket.join(`conv:${conversationId}`);
+        await socket.join(roomNameForConversation(conversationId));
+        socket.data.joinedConversations.add(String(conversationId));
         if (typeof cb === 'function') cb({ ok: true });
       } catch (e) {
         if (typeof cb === 'function') cb({ ok: false, error: e.message });
@@ -57,7 +107,45 @@ function initSocket(httpServer) {
 
     socket.on('conversation:leave', (payload) => {
       const conversationId = String(payload?.conversationId ?? '').trim();
-      if (conversationId) socket.leave(`conv:${conversationId}`);
+      if (conversationId) {
+        socket.leave(roomNameForConversation(conversationId));
+        socket.data.joinedConversations?.delete(String(conversationId));
+      }
+    });
+
+    // Typing indicators
+    socket.on('typing:start', async (payload, cb) => {
+      try {
+        const conversationId = String(payload?.conversationId ?? '').trim();
+        if (!conversationId) throw new Error('conversationId required');
+        const conv = await ensureConversationMember(conversationId, userId);
+        if (!conv) throw new Error('Forbidden');
+        socket.to(roomNameForConversation(conversationId)).emit('typing:update', {
+          conversationId,
+          userId: String(userId),
+          isTyping: true
+        });
+        if (typeof cb === 'function') cb({ ok: true });
+      } catch (e) {
+        if (typeof cb === 'function') cb({ ok: false, error: e.message });
+      }
+    });
+
+    socket.on('typing:stop', async (payload, cb) => {
+      try {
+        const conversationId = String(payload?.conversationId ?? '').trim();
+        if (!conversationId) throw new Error('conversationId required');
+        const conv = await ensureConversationMember(conversationId, userId);
+        if (!conv) throw new Error('Forbidden');
+        socket.to(roomNameForConversation(conversationId)).emit('typing:update', {
+          conversationId,
+          userId: String(userId),
+          isTyping: false
+        });
+        if (typeof cb === 'function') cb({ ok: true });
+      } catch (e) {
+        if (typeof cb === 'function') cb({ ok: false, error: e.message });
+      }
     });
 
     // Optional: send messages over socket (persists + emits + triggers FCM)
@@ -96,16 +184,58 @@ function initSocket(httpServer) {
         });
 
         emitMessageNew(conv.memberIds, conversationId, message);
+
+        // If a recipient currently has this conversation open (joined the room),
+        // we treat the message as read for that user and suppress FCM for them.
+        const inRoom = getUsersCurrentlyInConversation(conversationId);
+        const recipients = conv.memberIds.map(String).filter((id) => id !== String(userId));
+        const activeRecipients = recipients.filter((id) => inRoom.has(String(id)));
+        if (activeRecipients.length > 0) {
+          await Promise.all(
+            activeRecipients.map((rid) =>
+              prisma.conversationReadState.upsert({
+                where: { conversationId_userId: { conversationId, userId: String(rid) } },
+                create: {
+                  conversationId,
+                  userId: String(rid),
+                  lastReadMessageId: String(message.id),
+                  lastReadAt: message.createdAt
+                },
+                update: {
+                  lastReadMessageId: String(message.id),
+                  lastReadAt: message.createdAt
+                }
+              })
+            )
+          );
+          io.to(roomNameForConversation(conversationId)).emit('conversation:read', {
+            conversationId,
+            messageId: String(message.id),
+            userIds: activeRecipients
+          });
+        }
+
         notifyNewChatMessage({
           memberIds: conv.memberIds,
           senderId: userId,
           conversationId,
-          message
+          message,
+          suppressUserIds: activeRecipients
         }).catch(() => {});
 
         if (typeof cb === 'function') cb({ ok: true, data: { message } });
       } catch (e) {
         if (typeof cb === 'function') cb({ ok: false, error: e.message });
+      }
+    });
+
+    socket.on('disconnect', () => {
+      const cur = onlineSocketCounts.get(String(userId)) ?? 0;
+      const next = Math.max(0, cur - 1);
+      if (next === 0) onlineSocketCounts.delete(String(userId));
+      else onlineSocketCounts.set(String(userId), next);
+      if (cur > 0 && next === 0) {
+        emitPresenceToPeers(userId, false).catch(() => {});
       }
     });
   });
@@ -118,14 +248,15 @@ function emitMessageNew(memberIds, conversationId, message) {
   const cid = String(conversationId);
   const payload = { conversationId: cid, message };
 
-  io.to(`conv:${cid}`).emit('message:new', payload);
+  io.to(roomNameForConversation(cid)).emit('message:new', payload);
   for (const mid of memberIds.map(String)) {
-    io.to(`user:${mid}`).emit('message:new', payload);
+    io.to(roomNameForUser(mid)).emit('message:new', payload);
   }
 }
 
 module.exports = {
   initSocket,
-  emitMessageNew
+  emitMessageNew,
+  getUsersCurrentlyInConversation
 };
 

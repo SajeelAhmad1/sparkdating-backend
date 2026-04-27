@@ -6,7 +6,11 @@ const { NOTIFICATIONS_VALIDATION } = require('../validations/notifications.valid
 const { USER_VALIDATION } = require('../validations/user.validation');
 
 exports.me = catchAsync(async (req, res) => {
-  res.json({ status: 'success', data: { user: req.user } });
+  const me = String(req.user.id);
+  const matchesCount = await prisma.match.count({
+    where: { OR: [{ user1Id: me }, { user2Id: me }] }
+  });
+  res.json({ status: 'success', data: { user: { ...req.user, matchesCount } } });
 });
 
 exports.updateNotificationPreferences = catchAsync(async (req, res) => {
@@ -26,6 +30,7 @@ exports.updateNotificationPreferences = catchAsync(async (req, res) => {
 
 exports.getUserById = catchAsync(async (req, res) => {
   const { userId } = parseBody(USER_VALIDATION.getUserById, req);
+  const me = String(req.user.id);
 
   const user = await prisma.user.findUnique({
     where: { id: String(userId) },
@@ -48,6 +53,28 @@ exports.getUserById = catchAsync(async (req, res) => {
 
   if (!user) throw new AppError('User not found', 404);
 
-  res.json({ status: 'success', data: { user } });
+  const uid = String(user.id);
+  const [matchesCount, conversation] = await Promise.all([
+    prisma.match.count({ where: { OR: [{ user1Id: uid }, { user2Id: uid }] } }),
+    prisma.conversation.findFirst({
+      where: { type: 'direct', memberIds: { hasEvery: [me, uid] } },
+      select: { id: true }
+    })
+  ]);
+
+  let streakCount = 0;
+  if (conversation?.id) {
+    streakCount = await prisma.message.count({
+      where: {
+        conversationId: String(conversation.id),
+        type: 'streak',
+        senderId: { not: me },
+        streakExpiresAt: { gt: new Date() },
+        streakViewedBy: { hasNone: [me] }
+      }
+    });
+  }
+
+  res.json({ status: 'success', data: { user: { ...user, matchesCount, streakCount } } });
 });
 
