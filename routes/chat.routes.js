@@ -3,11 +3,13 @@ const chatController = require('../controllers/chat.controller');
 
 const router = express.Router();
 
+// REST-only: conversation management and message history
 router.post('/conversations/direct', chatController.createDirectConversation);
 router.get('/conversations', chatController.listConversations);
 router.get('/conversations/:conversationId/messages', chatController.listMessages);
-router.post('/conversations/:conversationId/messages', chatController.sendMessage);
-router.post('/conversations/:conversationId/read', chatController.markConversationRead);
+
+// NOTE: POST /conversations/:id/messages (send) and POST /conversations/:id/read
+// are intentionally removed — handled exclusively via Socket.IO message:send and message:read.
 
 module.exports = router;
 

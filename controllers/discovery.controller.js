@@ -383,7 +383,7 @@ exports.discoverProfiles = catchAsync(async (req, res) => {
         maxAge,
         basedOnMyAge: myAge
       },
-      users: responseUsers.map((user) => mapDiscoveryUser(user, distanceByUserId)),
+      profiles: responseUsers.map((user) => mapDiscoveryUser(user, distanceByUserId)),
       nextCursor
     }
   });

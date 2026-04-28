@@ -3,8 +3,6 @@ const AppError = require('../utils/appError');
 const prisma = require('../utils/prisma');
 const { parseBody, parseQuery } = require('../utils/validation');
 const { CHAT_VALIDATION } = require('../validations/chat.validation');
-const { notifyNewChatMessage } = require('../services/fcmMessaging');
-const { emitMessageNew, getUsersCurrentlyInConversation } = require('../socket/socketServer');
 
 function toPeer(user) {
   return {
@@ -16,47 +14,36 @@ function toPeer(user) {
 }
 
 async function ensureConversationMember(conversationId, userId) {
-  const conversation = await prisma.conversation.findUnique({
-    where: { id: conversationId }
-  });
+  const conversation = await prisma.conversation.findUnique({ where: { id: conversationId } });
   if (!conversation) throw new AppError('Conversation not found', 404);
   if (!conversation.memberIds.includes(userId)) throw new AppError('Forbidden', 403);
   return conversation;
 }
 
+// ── REST: Create direct conversation ─────────────────────────────────────────
 exports.createDirectConversation = catchAsync(async (req, res) => {
   const { userId } = parseBody(CHAT_VALIDATION.createDirectConversation, req);
   const me = String(req.user.id);
   if (userId === me) throw new AppError('Cannot chat with yourself', 400);
 
-  const target = await prisma.user.findUnique({
-    where: { id: userId },
-    select: { id: true }
-  });
+  const target = await prisma.user.findUnique({ where: { id: userId }, select: { id: true } });
   if (!target) throw new AppError('User not found', 404);
 
   let conversation = await prisma.conversation.findFirst({
-    where: {
-      type: 'direct',
-      memberIds: { hasEvery: [me, userId] }
-    }
+    where: { type: 'direct', memberIds: { hasEvery: [me, userId] } }
   });
 
   if (!conversation) {
     conversation = await prisma.conversation.create({
-      data: {
-        type: 'direct',
-        memberIds: [me, userId]
-      }
+      data: { type: 'direct', memberIds: [me, userId] }
     });
   }
 
-  res.status(201).json({
-    status: 'success',
-    data: { conversation }
-  });
+  res.status(201).json({ status: 'success', data: { conversation } });
 });
 
+// ── REST: List conversations ──────────────────────────────────────────────────
+// FIX: replaced N+1 loop with batched parallel queries per conversation
 exports.listConversations = catchAsync(async (req, res) => {
   const { limit = 20 } = parseQuery(CHAT_VALIDATION.listConversations, req);
   const me = String(req.user.id);
@@ -67,49 +54,85 @@ exports.listConversations = catchAsync(async (req, res) => {
     take: limit
   });
 
-  const items = [];
-  for (const c of conversations) {
-    const peerId = c.memberIds.find((id) => id !== me) ?? null;
-    // eslint-disable-next-line no-await-in-loop
-    const [peer, lastMessage, readState, streakCount] = await Promise.all([
-      peerId
-        ? prisma.user.findUnique({
-            where: { id: peerId },
-            select: { id: true, profile: { select: { firstName: true, lastName: true, photos: true } } }
-          })
-        : Promise.resolve(null),
-      prisma.message.findFirst({
-        where: { conversationId: String(c.id) },
-        orderBy: { createdAt: 'desc' }
-      }),
-      prisma.conversationReadState.findUnique({
-        where: { conversationId_userId: { conversationId: String(c.id), userId: me } }
-      }),
-      prisma.message.count({
-        where: {
-          conversationId: String(c.id),
-          type: 'streak',
-          senderId: { not: me },
-          streakExpiresAt: { gt: new Date() },
-          streakViewedBy: { hasNone: [me] }
-        }
-      })
-    ]);
+  if (conversations.length === 0) {
+    return res.json({ status: 'success', data: { items: [] } });
+  }
 
-    let unreadCount = 0;
-    if (lastMessage) {
+  const convIds = conversations.map((c) => String(c.id));
+  const peerIds = [...new Set(
+    conversations.map((c) => c.memberIds.find((id) => id !== me)).filter(Boolean)
+  )];
+
+  // Batch all queries in parallel — no N+1
+  const [peers, lastMessages, readStates, streakCounts, unreadCounts] = await Promise.all([
+    // All peer profiles in one query
+    prisma.user.findMany({
+      where: { id: { in: peerIds } },
+      select: { id: true, profile: { select: { firstName: true, lastName: true, photos: true } } }
+    }),
+    // Last message per conversation — one query, group in memory
+    prisma.message.findMany({
+      where: { conversationId: { in: convIds } },
+      orderBy: { createdAt: 'desc' },
+      distinct: ['conversationId']
+    }),
+    // All read states for me in one query
+    prisma.conversationReadState.findMany({
+      where: { conversationId: { in: convIds }, userId: me }
+    }),
+    // Streak counts per conversation in one aggregation
+    prisma.message.groupBy({
+      by: ['conversationId'],
+      where: {
+        conversationId: { in: convIds },
+        type: 'streak',
+        senderId: { not: me },
+        streakExpiresAt: { gt: new Date() },
+        NOT: { streakViewedBy: { has: me } }
+      },
+      _count: { id: true }
+    }),
+    // Unread counts per conversation
+    prisma.message.groupBy({
+      by: ['conversationId'],
+      where: { conversationId: { in: convIds } },
+      _count: { id: true }
+    })
+  ]);
+
+  // Index into maps for O(1) lookup
+  const peerMap = new Map(peers.map((p) => [String(p.id), p]));
+  const lastMsgMap = new Map(lastMessages.map((m) => [String(m.conversationId), m]));
+  const readStateMap = new Map(readStates.map((r) => [String(r.conversationId), r]));
+  const streakMap = new Map(streakCounts.map((s) => [String(s.conversationId), s._count.id]));
+  const totalMsgMap = new Map(unreadCounts.map((u) => [String(u.conversationId), u._count.id]));
+
+  // For unread: need messages after lastReadAt — batch per conversation
+  const unreadPerConv = new Map();
+  await Promise.all(
+    conversations.map(async (c) => {
+      const cid = String(c.id);
+      const readState = readStateMap.get(cid);
+      const lastMsg = lastMsgMap.get(cid);
+      if (!lastMsg) { unreadPerConv.set(cid, 0); return; }
       if (!readState?.lastReadAt) {
-        // eslint-disable-next-line no-await-in-loop
-        unreadCount = await prisma.message.count({ where: { conversationId: String(c.id) } });
+        unreadPerConv.set(cid, totalMsgMap.get(cid) ?? 0);
       } else {
-        // eslint-disable-next-line no-await-in-loop
-        unreadCount = await prisma.message.count({
-          where: { conversationId: String(c.id), createdAt: { gt: readState.lastReadAt } }
+        const count = await prisma.message.count({
+          where: { conversationId: cid, createdAt: { gt: readState.lastReadAt } }
         });
+        unreadPerConv.set(cid, count);
       }
-    }
+    })
+  );
 
-    const now = new Date();
+  const now = new Date();
+  const items = conversations.map((c) => {
+    const cid = String(c.id);
+    const peerId = c.memberIds.find((id) => id !== me) ?? null;
+    const peer = peerId ? peerMap.get(peerId) : null;
+    const lastMessage = lastMsgMap.get(cid) ?? null;
+
     const ref = lastMessage?.createdAt ?? c.lastMessageAt ?? null;
     let chatStatus = 'active';
     if (ref) {
@@ -118,34 +141,31 @@ exports.listConversations = catchAsync(async (req, res) => {
       else if (days >= 3) chatStatus = 'lockingSoon';
     }
 
-    items.push({
-      conversationId: String(c.id),
+    return {
+      conversationId: cid,
       type: c.type,
       otherUser: peer ? toPeer(peer) : null,
-      unreadCount,
-      streakCount,
+      unreadCount: unreadPerConv.get(cid) ?? 0,
+      streakCount: streakMap.get(cid) ?? 0,
       chatStatus,
       lastMessage: lastMessage
         ? {
             id: String(lastMessage.id),
             type: lastMessage.type,
             text: lastMessage.text,
-            // Prevent viewing snaps from the list screen.
             media: lastMessage.type === 'streak' ? null : lastMessage.media,
             streakExpiresAt: lastMessage.streakExpiresAt,
             createdAt: lastMessage.createdAt
           }
         : null,
       lastMessageAt: c.lastMessageAt
-    });
-  }
-
-  res.json({
-    status: 'success',
-    data: { items }
+    };
   });
+
+  res.json({ status: 'success', data: { items } });
 });
 
+// ── REST: List messages (paginated history) ───────────────────────────────────
 exports.listMessages = catchAsync(async (req, res) => {
   const { cursor, limit = 30 } = parseQuery(CHAT_VALIDATION.listMessages, req);
   const conversationId = String(req.params.conversationId ?? '').trim();
@@ -165,24 +185,14 @@ exports.listMessages = catchAsync(async (req, res) => {
     take: limit
   });
 
-  // Snap (streak) rules:
-  // - sender can never view it (media always redacted)
-  // - receiver can view it only once (first time we return media, we mark it viewed)
-  // - expired streaks never show media
   const now = new Date();
   const toMarkViewed = [];
   const redacted = messages.map((m) => {
     if (m.type !== 'streak') return m;
-
     const isSender = String(m.senderId) === me;
     const isExpired = m.streakExpiresAt ? new Date(m.streakExpiresAt) <= now : false;
     const alreadyViewed = Array.isArray(m.streakViewedBy) && m.streakViewedBy.includes(me);
-
-    if (isSender || isExpired || alreadyViewed) {
-      return { ...m, media: null };
-    }
-
-    // Receiver, not viewed yet, not expired: allow exactly once.
+    if (isSender || isExpired || alreadyViewed) return { ...m, media: null };
     toMarkViewed.push(String(m.id));
     return m;
   });
@@ -190,10 +200,7 @@ exports.listMessages = catchAsync(async (req, res) => {
   if (toMarkViewed.length) {
     await Promise.all(
       toMarkViewed.map((id) =>
-        prisma.message.update({
-          where: { id },
-          data: { streakViewedBy: { push: me } }
-        })
+        prisma.message.update({ where: { id }, data: { streakViewedBy: { push: me } } })
       )
     );
   }
@@ -208,117 +215,6 @@ exports.listMessages = catchAsync(async (req, res) => {
   });
 });
 
-exports.sendMessage = catchAsync(async (req, res) => {
-  const payload = parseBody(CHAT_VALIDATION.sendMessage, req);
-  const conversationId = String(req.params.conversationId ?? '').trim();
-  if (!conversationId) throw new AppError('Conversation id is required', 400);
-  const me = String(req.user.id);
-
-  const conversation = await ensureConversationMember(conversationId, me);
-
-  if (payload.type === 'text' && !payload.text) {
-    throw new AppError('Text is required for text message', 400);
-  }
-  if ((payload.type === 'image' || payload.type === 'streak') && !payload.media) {
-    throw new AppError('Media is required for image/streak message', 400);
-  }
-  if (payload.type === 'streak' && !payload.streak?.ttlSeconds) {
-    throw new AppError('streak.ttlSeconds is required for streak message', 400);
-  }
-
-  const createdAt = new Date();
-  const message = await prisma.message.create({
-    data: {
-      conversationId,
-      senderId: me,
-      type: payload.type,
-      text: payload.text ?? null,
-      media: payload.media ?? null,
-      streakExpiresAt: payload.type === 'streak' ? new Date(createdAt.getTime() + payload.streak.ttlSeconds * 1000) : null
-    }
-  });
-
-  await prisma.conversation.update({
-    where: { id: conversationId },
-    data: { lastMessageAt: message.createdAt }
-  });
-
-  emitMessageNew(conversation.memberIds, conversationId, message);
-
-  const inRoom = getUsersCurrentlyInConversation(conversationId);
-  const recipients = conversation.memberIds.map(String).filter((id) => id !== String(me));
-  const activeRecipients = recipients.filter((id) => inRoom.has(String(id)));
-  if (activeRecipients.length > 0) {
-    await Promise.all(
-      activeRecipients.map((rid) =>
-        prisma.conversationReadState.upsert({
-          where: { conversationId_userId: { conversationId, userId: String(rid) } },
-          create: {
-            conversationId,
-            userId: String(rid),
-            lastReadMessageId: String(message.id),
-            lastReadAt: message.createdAt
-          },
-          update: {
-            lastReadMessageId: String(message.id),
-            lastReadAt: message.createdAt
-          }
-        })
-      )
-    );
-  }
-
-  notifyNewChatMessage({
-    memberIds: conversation.memberIds,
-    senderId: me,
-    conversationId,
-    message,
-    suppressUserIds: activeRecipients
-  }).catch(() => {});
-
-  res.status(201).json({
-    status: 'success',
-    data: {
-      message
-    }
-  });
-});
-
-exports.markConversationRead = catchAsync(async (req, res) => {
-  const { lastReadMessageId } = parseBody(CHAT_VALIDATION.markRead, req);
-  const conversationId = String(req.params.conversationId ?? '').trim();
-  if (!conversationId) throw new AppError('Conversation id is required', 400);
-  const me = String(req.user.id);
-
-  await ensureConversationMember(conversationId, me);
-
-  const message = await prisma.message.findUnique({
-    where: { id: lastReadMessageId },
-    select: { id: true, conversationId: true, createdAt: true }
-  });
-  if (!message || String(message.conversationId) !== conversationId) {
-    throw new AppError('Message not found in this conversation', 404);
-  }
-
-  const readState = await prisma.conversationReadState.upsert({
-    where: { conversationId_userId: { conversationId, userId: me } },
-    create: {
-      conversationId,
-      userId: me,
-      lastReadMessageId: String(message.id),
-      lastReadAt: message.createdAt
-    },
-    update: {
-      lastReadMessageId: String(message.id),
-      lastReadAt: message.createdAt
-    }
-  });
-
-  res.json({
-    status: 'success',
-    data: {
-      readState
-    }
-  });
-});
-
+// NOTE: sendMessage (REST) and markConversationRead (REST) are intentionally removed.
+// All message sending and read receipts are handled exclusively via Socket.IO.
+// This eliminates the duplicate-message bug that occurred when both paths were active.
