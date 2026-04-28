@@ -39,6 +39,74 @@ function normalizePair(a, b) {
   return String(a) < String(b) ? [String(a), String(b)] : [String(b), String(a)];
 }
 
+const DISCOVERY_DEFAULT_LIMIT = 10;
+const DISCOVERY_MAX_LIMIT = 50;
+const DISCOVERY_INTERNAL_BATCH_BUFFER = 5;
+const DISCOVERY_NEARBY_LOCATION_LIMIT = 1000;
+
+function encodeDiscoveryCursor(payload) {
+  return Buffer.from(JSON.stringify(payload), 'utf8').toString('base64');
+}
+
+function decodeDiscoveryCursor(cursor) {
+  if (!cursor) return null;
+
+  try {
+    const decoded = Buffer.from(String(cursor), 'base64').toString('utf8');
+    const parsed = JSON.parse(decoded);
+    const createdAt = new Date(parsed.createdAt);
+    const id = String(parsed.id ?? '').trim();
+
+    if (!id || Number.isNaN(createdAt.getTime())) return null;
+    return { createdAt, id };
+  } catch {
+    return null;
+  }
+}
+
+function buildDiscoveryCursorFilter(cursor) {
+  if (!cursor) return {};
+
+  return {
+    OR: [
+      { createdAt: { lt: cursor.createdAt } },
+      {
+        createdAt: cursor.createdAt,
+        id: { lt: cursor.id }
+      }
+    ]
+  };
+}
+
+function buildDiscoveryNextCursor(user) {
+  if (!user?.createdAt || !user?.id) return null;
+  return encodeDiscoveryCursor({
+    createdAt: new Date(user.createdAt).toISOString(),
+    id: String(user.id)
+  });
+}
+
+function hasSharedInterest(user, myInterestIds) {
+  return user.interests.some((ui) => myInterestIds.has(String(ui.interestId)));
+}
+
+function mapDiscoveryUser(user, distanceByUserId) {
+  const age = calculateAge(user.profile.dob);
+  const loc = distanceByUserId.get(String(user.id));
+
+  return {
+    id: String(user.id),
+    firstName: user.profile.firstName,
+    lastName: user.profile.lastName,
+    age,
+    gender: user.profile.gender,
+    bio: user.profile.bio,
+    photos: user.profile.photos,
+    interests: user.interests.map((ui) => ui.interest.name),
+    location: loc ?? null
+  };
+}
+
 function discoveryPrefsFromUser(user) {
   const youngerAgeDelta = user.youngerAgeDelta ?? 5;
   const olderAgeDelta = user.olderAgeDelta ?? 5;
@@ -127,10 +195,12 @@ exports.updateLocation = catchAsync(async (req, res) => {
 });
 
 exports.discoverProfiles = catchAsync(async (req, res) => {
-  const { lat, lng, limit } = parseBody(DISCOVERY_VALIDATION.discoverProfiles, req);
+  const { lat, lng, cursor, limit = DISCOVERY_DEFAULT_LIMIT } = parseBody(DISCOVERY_VALIDATION.discoverProfiles, req);
   const me = req.user;
   const myUserId = String(me.id);
   const myGender = me.profile?.gender;
+  const requestedLimit = Math.min(limit, DISCOVERY_MAX_LIMIT);
+  const decodedCursor = decodeDiscoveryCursor(cursor);
 
   if (!me.profile) throw new AppError(DISCOVERY_ERRORS.PROFILE_REQUIRED, 403);
   const discoveryFilter = discoveryPrefsFromUser(me);
@@ -160,36 +230,100 @@ exports.discoverProfiles = catchAsync(async (req, res) => {
       },
       userId: { $ne: toObjectId(myUserId) }
     },
-    options: { limit: 200 }
+    options: { limit: DISCOVERY_NEARBY_LOCATION_LIMIT }
   });
 
   const nearbyUserIds = nearbyLocations.map((loc) => String(loc.userId?.$oid ?? loc.userId)).filter(Boolean);
   if (!nearbyUserIds.length) {
-    return res.json({ status: 'success', data: { area, profiles: [] } });
+    return res.json({
+      status: 'success',
+      data: {
+        area,
+        appliedFilter: {
+          maxDistanceKm: discoveryFilter.maxDistanceKm,
+          maxDistanceMiles: discoveryFilter.maxDistanceMiles,
+          minAge,
+          maxAge,
+          basedOnMyAge: myAge
+        },
+        users: [],
+        nextCursor: null
+      }
+    });
   }
 
-  const blockRows = await prisma.userBlock.findMany({
-    where: {
-      OR: [{ blockerId: myUserId }, { blockedUserId: myUserId }]
-    },
-    select: { blockerId: true, blockedUserId: true }
-  });
-  const blockedUserIds = new Set();
-  blockRows.forEach((b) => {
-    blockedUserIds.add(String(b.blockerId));
-    blockedUserIds.add(String(b.blockedUserId));
-  });
-  blockedUserIds.delete(myUserId);
-
-  const [mySwipes, myMatches, candidates] = await Promise.all([
+  const [blockRows, mySwipes, myMatches, myConnectionRequests] = await Promise.all([
+    prisma.userBlock.findMany({
+      where: {
+        OR: [{ blockerId: myUserId }, { blockedUserId: myUserId }]
+      },
+      select: { blockerId: true, blockedUserId: true }
+    }),
     prisma.swipe.findMany({ where: { fromUserId: myUserId }, select: { toUserId: true } }),
     prisma.match.findMany({
       where: { OR: [{ user1Id: myUserId }, { user2Id: myUserId }] },
       select: { user1Id: true, user2Id: true }
     }),
-    prisma.user.findMany({
+    prisma.connectionRequest.findMany({
       where: {
-        id: { in: nearbyUserIds },
+        OR: [{ fromUserId: myUserId }, { toUserId: myUserId }]
+      },
+      select: { fromUserId: true, toUserId: true }
+    })
+  ]);
+
+  const excluded = new Set([myUserId]);
+  blockRows.forEach((b) => {
+    excluded.add(String(b.blockerId));
+    excluded.add(String(b.blockedUserId));
+  });
+  mySwipes.forEach((s) => excluded.add(String(s.toUserId)));
+  myMatches.forEach((m) => {
+    excluded.add(String(m.user1Id));
+    excluded.add(String(m.user2Id));
+  });
+  myConnectionRequests.forEach((request) => {
+    excluded.add(String(request.fromUserId));
+    excluded.add(String(request.toUserId));
+  });
+
+  const candidateUserIds = nearbyUserIds.filter((userId) => !excluded.has(userId));
+  if (!candidateUserIds.length) {
+    return res.json({
+      status: 'success',
+      data: {
+        area,
+        appliedFilter: {
+          maxDistanceKm: discoveryFilter.maxDistanceKm,
+          maxDistanceMiles: discoveryFilter.maxDistanceMiles,
+          minAge,
+          maxAge,
+          basedOnMyAge: myAge
+        },
+        users: [],
+        nextCursor: null
+      }
+    });
+  }
+
+  const myInterestIds = new Set(me.interests.map((ui) => String(ui.interestId)));
+  const distanceByUserId = new Map(
+    nearbyLocations.map((loc) => [String(loc.userId?.$oid ?? loc.userId), { lat: loc.lat, lng: loc.lng }])
+  );
+  const targetCount = requestedLimit + 1;
+  const internalBatchSize = Math.min(
+    DISCOVERY_MAX_LIMIT,
+    Math.max(requestedLimit + DISCOVERY_INTERNAL_BATCH_BUFFER, requestedLimit * 2)
+  );
+
+  let queryCursor = decodedCursor;
+  let hasMoreSourceRows = true;
+  const collectedUsers = [];
+
+  while (collectedUsers.length < targetCount && hasMoreSourceRows) {
+    const batch = await prisma.user.findMany({
+      where: {
+        id: { in: candidateUserIds },
         profile: {
           is: {
             gender:
@@ -201,47 +335,42 @@ exports.discoverProfiles = catchAsync(async (req, res) => {
               gte: oldestDob
             }
           }
-        }
+        },
+        ...buildDiscoveryCursorFilter(queryCursor)
       },
       include: {
         profile: true,
         interests: { include: { interest: true } }
-      }
-    })
-  ]);
-
-  const excluded = new Set([myUserId]);
-  mySwipes.forEach((s) => excluded.add(String(s.toUserId)));
-  myMatches.forEach((m) => {
-    excluded.add(String(m.user1Id));
-    excluded.add(String(m.user2Id));
-  });
-
-  const myInterestIds = new Set(me.interests.map((ui) => String(ui.interestId)));
-  const distanceByUserId = new Map(
-    nearbyLocations.map((loc) => [String(loc.userId?.$oid ?? loc.userId), { lat: loc.lat, lng: loc.lng }])
-  );
-
-  const profiles = candidates
-    .filter((user) => !excluded.has(String(user.id)))
-    .filter((user) => !blockedUserIds.has(String(user.id)))
-    .filter((user) => user.interests.some((ui) => myInterestIds.has(String(ui.interestId))))
-    .slice(0, limit)
-    .map((user) => {
-      const age = calculateAge(user.profile.dob);
-      const loc = distanceByUserId.get(String(user.id));
-      return {
-        id: String(user.id),
-        firstName: user.profile.firstName,
-        lastName: user.profile.lastName,
-        age,
-        gender: user.profile.gender,
-        bio: user.profile.bio,
-        photos: user.profile.photos,
-        interests: user.interests.map((ui) => ui.interest.name),
-        location: loc ?? null
-      };
+      },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      take: internalBatchSize
     });
+
+    if (!batch.length) {
+      hasMoreSourceRows = false;
+      break;
+    }
+
+    queryCursor = {
+      createdAt: batch[batch.length - 1].createdAt,
+      id: String(batch[batch.length - 1].id)
+    };
+
+    for (const user of batch) {
+      if (!hasSharedInterest(user, myInterestIds)) continue;
+      collectedUsers.push(user);
+      if (collectedUsers.length >= targetCount) break;
+    }
+
+    if (batch.length < internalBatchSize) {
+      hasMoreSourceRows = false;
+    }
+  }
+
+  const responseUsers = collectedUsers.slice(0, requestedLimit);
+  const nextCursor = collectedUsers.length > requestedLimit
+    ? buildDiscoveryNextCursor(responseUsers[responseUsers.length - 1])
+    : null;
 
   res.json({
     status: 'success',
@@ -254,7 +383,8 @@ exports.discoverProfiles = catchAsync(async (req, res) => {
         maxAge,
         basedOnMyAge: myAge
       },
-      profiles
+      users: responseUsers.map((user) => mapDiscoveryUser(user, distanceByUserId)),
+      nextCursor
     }
   });
 });
