@@ -1,6 +1,10 @@
 # .gitignore
 .env
 node_modules
+
+# Firebase Admin SDK keys (never commit)
+*-firebase-adminsdk-*.json
+firebase-service-account.json
 .prisma
 npm-debug.log*
 yarn-debug.log*
