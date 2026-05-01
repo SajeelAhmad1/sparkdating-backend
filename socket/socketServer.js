@@ -1,7 +1,31 @@
 const { Server } = require('socket.io');
 const { verifyAccessToken } = require('../utils/jwt');
 const prisma = require('../utils/prisma');
-const { notifyNewChatMessage } = require('../services/fcmMessaging');
+const { enqueueFcmNotification } = require('../queue/fcmQueue');
+const Redis = require('ioredis');
+const { redisConnection } = require('../queue/fcmQueue');
+
+// Redis client for publishing online-user presence keys
+// Worker reads these to suppress FCM for online users
+let redisClient = null;
+function getRedis() {
+  if (!redisClient) {
+    const conn = redisConnection();
+    const redisOpts = {
+      ...(conn.url ? {} : conn),
+      maxRetriesPerRequest: null,
+      retryStrategy: (times) => Math.min(times * 1000, 30000),
+      ...(conn.tls ? { tls: conn.tls } : {}),
+    };
+    redisClient = conn.url ? new Redis(conn.url, redisOpts) : new Redis(redisOpts);
+    redisClient.on('error', (err) =>
+      console.error('[Socket/Redis] error:', err.message || err.code || 'Connection failed - is Redis running?')
+    );
+  }
+  return redisClient;
+}
+
+const ONLINE_KEY_TTL = 90; // seconds — refreshed on each new socket connection
 
 let io;
 const onlineSocketCounts = new Map(); // userId -> number of connected sockets
@@ -125,13 +149,14 @@ async function persistAndBroadcast({ conversationId, senderId, type, text, media
 
   emitMessageNew(conversationId, message);
 
-  notifyNewChatMessage({
-    memberIds: conv?.memberIds ?? [],
-    senderId,
-    conversationId,
-    message,
-    suppressUserIds: activeRecipients
-  }).catch(() => {});
+  // Enqueue FCM job — fully decoupled, never blocks message flow
+  enqueueFcmNotification({
+    messageId: String(message.id),
+    conversationId: String(conversationId),
+    senderId: String(senderId),
+    memberIds: (conv?.memberIds ?? []).map(String),
+    suppressUserIds: activeRecipients,
+  });
 
   return message;
 }
@@ -170,6 +195,8 @@ function initSocket(httpServer) {
     if (prev === 0) {
       emitPresenceToPeers(userId, true).catch(() => {});
     }
+    // Publish online status to Redis so FCM worker can suppress notifications
+    getRedis().set(`online:${String(userId)}`, String(prev + 1), 'EX', ONLINE_KEY_TTL).catch(() => {});
     log('connection', { userId, totalSockets: prev + 1 });
 
     // ── conversation:join ─────────────────────────────────────────────────
@@ -319,6 +346,11 @@ function initSocket(httpServer) {
       else onlineSocketCounts.set(String(userId), next);
       if (cur > 0 && next === 0) {
         emitPresenceToPeers(userId, false).catch(() => {});
+        // Remove online key from Redis so FCM worker sends notifications again
+        getRedis().del(`online:${String(userId)}`).catch(() => {});
+      } else if (next > 0) {
+        // Update count in Redis
+        getRedis().set(`online:${String(userId)}`, String(next), 'EX', ONLINE_KEY_TTL).catch(() => {});
       }
       log('disconnect', { userId, remainingSockets: next });
     });
