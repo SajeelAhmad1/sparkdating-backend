@@ -153,6 +153,7 @@ exports.listConversations = catchAsync(async (req, res) => {
             id: String(lastMessage.id),
             type: lastMessage.type,
             text: lastMessage.text,
+            senderId: String(lastMessage.senderId),
             media: lastMessage.type === 'streak' ? null : lastMessage.media,
             streakExpiresAt: lastMessage.streakExpiresAt,
             createdAt: lastMessage.createdAt
