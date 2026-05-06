@@ -11,6 +11,7 @@ const chatRoutes = require('./chat.routes');
 const socialRoutes = require('./social.routes');
 const fcmRoutes = require('./fcm.routes');
 const usersRoutes = require('./users.routes');
+const cloudinaryRoutes = require('./cloudinary.routes');
 
 const router = express.Router();
 
@@ -27,6 +28,7 @@ router.patch('/profile/edit', protect, authController.editProfile);
 router.get('/me', protect, userController.me);
 router.use('/me/fcm-token', protect, fcmRoutes);
 router.patch('/me/notification-preferences', protect, userController.updateNotificationPreferences);
+router.use('/cloudinary', protect, cloudinaryRoutes);
 
 module.exports = router;
 

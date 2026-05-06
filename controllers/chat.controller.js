@@ -4,12 +4,14 @@ const prisma = require('../utils/prisma');
 const { parseBody, parseQuery } = require('../utils/validation');
 const { CHAT_VALIDATION } = require('../validations/chat.validation');
 
+const { photoUrls } = require('../utils/photos');
+
 function toPeer(user) {
   return {
     id: String(user.id),
     firstName: user.profile?.firstName ?? null,
     lastName: user.profile?.lastName ?? null,
-    photos: user.profile?.photos ?? []
+    photos: photoUrls(user.profile?.photos ?? [])
   };
 }
 

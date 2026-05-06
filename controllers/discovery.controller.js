@@ -8,6 +8,8 @@ const { DISCOVERY_ERRORS } = require('../errors/discovery.errors');
 const { SOCIAL_ERRORS } = require('../errors/social.errors');
 const { isBlockedEitherWay } = require('./social.controller');
 
+const { photoUrls } = require('../utils/photos');
+
 function toObjectId(id) {
   return { $oid: String(id) };
 }
@@ -101,7 +103,7 @@ function mapDiscoveryUser(user, distanceByUserId) {
     age,
     gender: user.profile.gender,
     bio: user.profile.bio,
-    photos: user.profile.photos,
+    photos: photoUrls(user.profile.photos),
     interests: user.interests.map((ui) => ui.interest.name),
     location: loc ?? null
   };

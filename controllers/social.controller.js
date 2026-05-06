@@ -5,6 +5,8 @@ const prisma = require('../utils/prisma');
 const { SOCIAL_VALIDATION } = require('../validations/social.validation');
 const { SOCIAL_ERRORS } = require('../errors/social.errors');
 
+const { photoUrls } = require('../utils/photos');
+
 function normalizePair(a, b) {
   return String(a) < String(b) ? [String(a), String(b)] : [String(b), String(a)];
 }
@@ -82,7 +84,7 @@ exports.listBlockedUsers = catchAsync(async (req, res) => {
       id: String(b.blockedUser.id),
       firstName: b.blockedUser.profile?.firstName ?? null,
       lastName: b.blockedUser.profile?.lastName ?? null,
-      photos: b.blockedUser.profile?.photos ?? []
+      photos: photoUrls(b.blockedUser.profile?.photos ?? [])
     }
   }));
 
@@ -285,7 +287,7 @@ exports.listConnectionRequests = catchAsync(async (req, res) => {
         id: String(peer.id),
         firstName: peer.profile?.firstName ?? null,
         lastName: peer.profile?.lastName ?? null,
-        photos: peer.profile?.photos ?? []
+        photos: photoUrls(peer.profile?.photos ?? [])
       }
     };
   });
