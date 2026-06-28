@@ -7,6 +7,28 @@ const {
 } = require('../validations/notifications.validation');
 const { USER_VALIDATION } = require('../validations/user.validation');
 
+exports.deleteAccount = catchAsync(async (req, res) => {
+  const userId = String(req.user.id);
+
+  // Delete all user-related data then the user itself
+  await prisma.$transaction([
+    prisma.profile.deleteMany({ where: { userId } }),
+    prisma.userInterest.deleteMany({ where: { userId } }),
+    prisma.userLocation.deleteMany({ where: { userId } }),
+    prisma.fcmToken.deleteMany({ where: { userId } }),
+    prisma.refreshToken.deleteMany({ where: { userId } }),
+    prisma.swipe.deleteMany({ where: { OR: [{ fromUserId: userId }, { toUserId: userId }] } }),
+    prisma.match.deleteMany({ where: { OR: [{ user1Id: userId }, { user2Id: userId }] } }),
+    prisma.userBlock.deleteMany({ where: { OR: [{ blockerId: userId }, { blockedUserId: userId }] } }),
+    prisma.connectionRequest.deleteMany({ where: { OR: [{ fromUserId: userId }, { toUserId: userId }] } }),
+    prisma.message.deleteMany({ where: { senderId: userId } }),
+    prisma.conversationReadState.deleteMany({ where: { userId } }),
+    prisma.user.delete({ where: { id: userId } }),
+  ]);
+
+  res.json({ status: 'success' });
+});
+
 exports.me = catchAsync(async (req, res) => {
   const me = String(req.user.id);
   const matchesCount = await prisma.match.count({
