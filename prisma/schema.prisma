@@ -100,6 +100,25 @@ model SignupSession {
   @@index([usedAt])
 }
 
+model PasswordResetSession {
+  id           String   @id @default(auto()) @map("_id") @db.ObjectId
+  phone        String?
+  email        String?
+  otpHash      String
+  otpExpiresAt DateTime
+  verifiedAt   DateTime?
+  resetToken   String?
+  resetTokenExpiresAt DateTime?
+  usedAt       DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([phone])
+  @@index([email])
+  @@index([otpExpiresAt])
+}
+
 model RefreshToken {
   id        String   @id @default(auto()) @map("_id") @db.ObjectId
   userId    String   @db.ObjectId

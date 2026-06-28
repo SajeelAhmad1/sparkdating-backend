@@ -51,6 +51,17 @@ const AUTH_VALIDATION = Object.freeze({
   refresh: z.object({ refreshToken: z.string().min(10) }),
   logout: z.object({ refreshToken: z.string().min(10) }),
   googleVerify: z.object({ idToken: z.string().min(50) }),
+  forgotPasswordStart: requireExactlyOneContact(contactBaseSchema),
+  forgotPasswordVerify: requireExactlyOneContact(
+    contactBaseSchema.extend({
+      sessionId: z.string().min(1),
+      code: z.string().regex(/^\d{6}$/, 'Code must be 6 digits'),
+    })
+  ),
+  forgotPasswordReset: z.object({
+    resetToken: z.string().min(1),
+    newPassword: z.string().min(8).max(100),
+  }),
   completeProfile: z.object({
     firstName: z.string().min(1).max(80),
     lastName: z.string().min(1).max(80),

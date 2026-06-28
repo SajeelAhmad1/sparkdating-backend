@@ -1,6 +1,6 @@
 const catchAsync = require('../utils/catchAsync');
 const AppError = require('../utils/appError');
-const { generateOtp4 } = require('../utils/otp');
+const { generateOtp4, generateOtp6 } = require('../utils/otp');
 const { parseBody } = require('../utils/validation');
 const { AUTH_VALIDATION } = require('../validations/auth.validation');
 const { AUTH_ERRORS } = require('../errors/auth.errors');
@@ -11,6 +11,7 @@ const {
   verifyRefreshToken,
   sha256
 } = require('../utils/jwt');
+const crypto = require('crypto');
 
 const prisma = require('../utils/prisma');
 const bcrypt = require('bcryptjs');
@@ -297,6 +298,83 @@ exports.googleVerify = catchAsync(async (req, res) => {
       }
     }
   });
+});
+
+exports.forgotPasswordStart = catchAsync(async (req, res) => {
+  const contact = normalizeContact(parseBody(AUTH_VALIDATION.forgotPasswordStart, req));
+
+  const user = await prisma.user.findFirst({ where: buildContactWhere(contact) });
+  if (!user) throw new AppError(AUTH_ERRORS.USER_NOT_FOUND, 404);
+
+  const otp = generateOtp6();
+  const otpHash = sha256(otp);
+  const otpExpiresAt = new Date(Date.now() + OTP_TTL_MS);
+
+  const session = await prisma.passwordResetSession.create({
+    data: { ...contact, otpHash, otpExpiresAt }
+  });
+
+  // eslint-disable-next-line no-console
+  console.log(`[MOCK OTP] Password reset OTP for ${contact.email ?? contact.phone}: ${otp}`);
+
+  res.status(201).json({
+    status: 'success',
+    data: { sessionId: String(session.id) }
+  });
+});
+
+exports.forgotPasswordVerify = catchAsync(async (req, res) => {
+  const { sessionId, code, ...rawContact } = parseBody(AUTH_VALIDATION.forgotPasswordVerify, req);
+  const contact = normalizeContact(rawContact);
+
+  const session = await prisma.passwordResetSession.findFirst({
+    where: { id: sessionId, ...buildContactWhere(contact) }
+  });
+  if (!session) throw new AppError(AUTH_ERRORS.SIGNUP_SESSION_NOT_FOUND, 404);
+  if (session.usedAt) throw new AppError(AUTH_ERRORS.SIGNUP_SESSION_ALREADY_USED, 409);
+  if (new Date(session.otpExpiresAt).getTime() < Date.now()) throw new AppError(AUTH_ERRORS.OTP_EXPIRED, 400);
+  if (sha256(code) !== session.otpHash) throw new AppError(AUTH_ERRORS.INVALID_CODE, 400);
+
+  const resetToken = crypto.randomBytes(32).toString('hex');
+  const resetTokenExpiresAt = new Date(Date.now() + 15 * 60 * 1000); // 15 min
+
+  await prisma.passwordResetSession.update({
+    where: { id: session.id },
+    data: { verifiedAt: new Date(), resetToken: sha256(resetToken), resetTokenExpiresAt }
+  });
+
+  res.json({
+    status: 'success',
+    data: { resetToken }
+  });
+});
+
+exports.forgotPasswordReset = catchAsync(async (req, res) => {
+  const { resetToken, newPassword } = parseBody(AUTH_VALIDATION.forgotPasswordReset, req);
+
+  const session = await prisma.passwordResetSession.findFirst({
+    where: { resetToken: sha256(resetToken) }
+  });
+  if (!session) throw new AppError('Invalid or expired reset token', 400);
+  if (session.usedAt) throw new AppError(AUTH_ERRORS.SIGNUP_SESSION_ALREADY_USED, 409);
+  if (!session.resetTokenExpiresAt || new Date(session.resetTokenExpiresAt).getTime() < Date.now()) {
+    throw new AppError('Reset token has expired', 400);
+  }
+
+  const contact = buildContactWhere(
+    session.email ? { email: session.email } : { phone: session.phone }
+  );
+  const user = await prisma.user.findFirst({ where: contact });
+  if (!user) throw new AppError(AUTH_ERRORS.USER_NOT_FOUND, 404);
+
+  const passwordHash = await bcrypt.hash(newPassword, 12);
+  await prisma.user.update({ where: { id: user.id }, data: { passwordHash } });
+  await prisma.passwordResetSession.update({
+    where: { id: session.id },
+    data: { usedAt: new Date() }
+  });
+
+  res.json({ status: 'success' });
 });
 
 exports.completeProfile = catchAsync(async (req, res) => {
