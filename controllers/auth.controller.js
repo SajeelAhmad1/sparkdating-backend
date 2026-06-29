@@ -15,6 +15,8 @@ const crypto = require('crypto');
 
 const prisma = require('../utils/prisma');
 const bcrypt = require('bcryptjs');
+const { sendOtpEmail } = require('../services/email.service');
+const { sendOtpSms } = require('../services/sms.service');
 
 const OTP_TTL_MS = 5 * 60 * 1000;
 
@@ -67,9 +69,11 @@ exports.signupStart = catchAsync(async (req, res) => {
     data: { ...contact, otpHash, otpExpiresAt }
   });
 
-  // For now we mock SMS delivery.
-  // eslint-disable-next-line no-console
-  console.log(`[MOCK OTP] Signup OTP for ${contact.email ?? contact.phone}: ${otp}`);
+  if (contact.email) {
+    await sendOtpEmail({ to: contact.email, otp, type: 'signup', ttlMinutes: 5 });
+  } else if (contact.phone) {
+    await sendOtpSms({ to: contact.phone, otp, type: 'signup', ttlMinutes: 5 });
+  }
 
   res.status(201).json({
     status: 'success',
@@ -160,8 +164,11 @@ exports.loginStart = catchAsync(async (req, res) => {
   const session = await prisma.signupSession.create({
     data: { ...contact, otpHash, otpExpiresAt }
   });
-  // eslint-disable-next-line no-console
-  console.log(`[MOCK OTP] Login OTP for ${contact.email ?? contact.phone}: ${otp}`);
+  if (contact.email) {
+    await sendOtpEmail({ to: contact.email, otp, type: 'login', ttlMinutes: 5 });
+  } else if (contact.phone) {
+    await sendOtpSms({ to: contact.phone, otp, type: 'login', ttlMinutes: 5 });
+  }
 
   res.status(201).json({ status: 'success', data: { loginSessionId: String(session.id), next: 'enter_otp' } });
 });
@@ -314,8 +321,11 @@ exports.forgotPasswordStart = catchAsync(async (req, res) => {
     data: { ...contact, otpHash, otpExpiresAt }
   });
 
-  // eslint-disable-next-line no-console
-  console.log(`[MOCK OTP] Password reset OTP for ${contact.email ?? contact.phone}: ${otp}`);
+  if (contact.email) {
+    await sendOtpEmail({ to: contact.email, otp, type: 'password_reset', ttlMinutes: 5 });
+  } else if (contact.phone) {
+    await sendOtpSms({ to: contact.phone, otp, type: 'password_reset', ttlMinutes: 5 });
+  }
 
   res.status(201).json({
     status: 'success',
