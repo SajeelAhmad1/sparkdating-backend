@@ -34,10 +34,15 @@ model User {
   fcmTokens        FcmToken[]
   fcmNotificationsEnabled Boolean @default(true)
 
+  referralCode     String?
+  invitesSent      Int     @default(0)
+  referredByUserId String? @db.ObjectId
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@index([createdAt, id])
+  @@index([referredByUserId])
 }
 
 model Profile {
@@ -59,9 +64,10 @@ model Profile {
 }
 
 model Interest {
-  id       String @id @default(auto()) @map("_id") @db.ObjectId
-  name     String @unique
+  id       String  @id @default(auto()) @map("_id") @db.ObjectId
+  name     String  @unique
   category String
+  icon     String?
 
   users UserInterest[]
 
@@ -333,6 +339,17 @@ model FcmToken {
   updatedAt DateTime @updatedAt
 
   @@index([userId])
+}
+
+model AppLaunchConfig {
+  id                  String @id @default(auto()) @map("_id") @db.ObjectId
+  key                 String @unique @default("default")
+  launchTargetUsers   Int    @default(1000)
+  premiumInviteTarget Int    @default(2)
+  referralBaseUrl     String @default("https://spark.app/invite")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
 
 model DiscoveryFilter {

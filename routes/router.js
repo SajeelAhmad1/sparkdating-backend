@@ -12,6 +12,7 @@ const socialRoutes = require('./social.routes');
 const fcmRoutes = require('./fcm.routes');
 const usersRoutes = require('./users.routes');
 const cloudinaryRoutes = require('./cloudinary.routes');
+const referralRoutes = require('./referral.routes');
 
 const router = express.Router();
 
@@ -30,6 +31,7 @@ router.delete('/me', protect, userController.deleteAccount);
 router.use('/me/fcm-token', protect, fcmRoutes);
 router.patch('/me/notification-preferences', protect, userController.updateNotificationPreferences);
 router.use('/cloudinary', protect, cloudinaryRoutes);
+router.use('/referrals', protect, referralRoutes);
 
 module.exports = router;
 

@@ -53,38 +53,58 @@ async function main() {
   } catch {}
 
   const interests = [
-    // Content and lifestyle
-    { name: 'Content Creation', category: 'Content and lifestyle' },
-    { name: 'Privacy Focused Lifestyle', category: 'Content and lifestyle' },
-    { name: 'Online Entrepreneurship', category: 'Content and lifestyle' },
-    { name: 'Traveling for Work', category: 'Content and lifestyle' },
+    // Hobbies
+    { name: 'listening music', category: 'Hobbies', icon: '🎧' },
+    { name: 'Gymnastics', category: 'Hobbies', icon: '🤸' },
+    { name: 'Parties', category: 'Hobbies', icon: '🎉' },
+    { name: 'Massage', category: 'Hobbies', icon: '💆' },
+    { name: 'Running', category: 'Hobbies', icon: '🏃' },
+    { name: 'Basketball', category: 'Hobbies', icon: '🏀' },
+    { name: 'Football', category: 'Hobbies', icon: '⚽' },
+    { name: 'Books', category: 'Hobbies', icon: '📚' },
+    { name: 'Walking', category: 'Hobbies', icon: '🚶' },
+    { name: 'Hot yoga', category: 'Hobbies', icon: '🧘' },
+    { name: 'Meditation', category: 'Hobbies', icon: '🧘‍♂️' },
+    { name: 'Spotify', category: 'Hobbies', icon: '🎵' },
+    { name: 'Sushi', category: 'Hobbies', icon: '🍣' },
+    { name: 'Painting', category: 'Hobbies', icon: '🎨' },
+    { name: 'Theater', category: 'Hobbies', icon: '🎭' },
+    { name: 'Travel', category: 'Hobbies', icon: '🧳' },
+    { name: 'Aquarium', category: 'Hobbies', icon: '🐠' },
+    { name: 'Fitness', category: 'Hobbies', icon: '💪' },
+    { name: 'Self Care', category: 'Hobbies', icon: '🧖' },
+    { name: 'Hockey', category: 'Hobbies', icon: '🏒' },
+    { name: 'Playing guitar', category: 'Hobbies', icon: '🎸' },
+    { name: 'Coffee', category: 'Hobbies', icon: '☕' },
 
-    // Wellness and growth
-    { name: 'Fitness / Body Maintenance', category: 'Wellness and growth' },
-    { name: 'Fame-Aware Dating', category: 'Wellness and growth' },
-    { name: 'Mental Health & Self-Care', category: 'Wellness and growth' },
-
-    // Creative & Hobbies
-    { name: 'Photography', category: 'Creative & Hobbies' },
-    { name: 'Music', category: 'Creative & Hobbies' },
-    { name: 'Gaming', category: 'Creative & Hobbies' },
-    { name: 'Art', category: 'Creative & Hobbies' },
-    { name: 'Books', category: 'Creative & Hobbies' },
-    { name: 'Movies', category: 'Creative & Hobbies' },
-
-    // Lifestyle
-    { name: 'Travel', category: 'Lifestyle' },
-    { name: 'Food', category: 'Lifestyle' },
-    { name: 'Cooking', category: 'Lifestyle' },
-    { name: 'Dancing', category: 'Lifestyle' },
-    { name: 'Sports', category: 'Lifestyle' }
+    // Lifestyle & Social
+    { name: 'Drink / Party', category: 'Lifestyle & Social', icon: null },
+    { name: 'Study / Work', category: 'Lifestyle & Social', icon: null },
+    { name: 'Tessel', category: 'Lifestyle & Social', icon: null },
+    { name: 'Long Term Relationship', category: 'Lifestyle & Social', icon: null },
   ];
+
+  const interestNames = interests.map((interest) => interest.name);
+  const staleInterests = await prisma.interest.findMany({
+    where: { name: { notIn: interestNames } },
+    select: { id: true },
+  });
+
+  if (staleInterests.length) {
+    const staleIds = staleInterests.map((interest) => interest.id);
+    await prisma.userInterest.deleteMany({
+      where: { interestId: { in: staleIds } },
+    });
+    await prisma.interest.deleteMany({
+      where: { id: { in: staleIds } },
+    });
+  }
 
   for (const interest of interests) {
     await prisma.interest.upsert({
       where: { name: interest.name },
       create: interest,
-      update: { category: interest.category }
+      update: { category: interest.category, icon: interest.icon },
     });
   }
 
@@ -136,6 +156,21 @@ async function main() {
       maxDistanceKm: 50,
       isActive: true
     }
+  });
+
+  await prisma.appLaunchConfig.upsert({
+    where: { key: 'default' },
+    create: {
+      key: 'default',
+      launchTargetUsers: 1000,
+      premiumInviteTarget: 2,
+      referralBaseUrl: process.env.REFERRAL_BASE_URL || 'https://spark.app/invite',
+    },
+    update: {
+      launchTargetUsers: 1000,
+      premiumInviteTarget: 2,
+      referralBaseUrl: process.env.REFERRAL_BASE_URL || 'https://spark.app/invite',
+    },
   });
 
   // --- Chat seed (conversations + messages + read/unread + streak expiry mixes) ---

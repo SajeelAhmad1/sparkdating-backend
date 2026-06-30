@@ -17,6 +17,10 @@ const prisma = require('../utils/prisma');
 const bcrypt = require('bcryptjs');
 const { sendOtpEmail } = require('../services/email.service');
 const { sendOtpSms } = require('../services/sms.service');
+const {
+  generateReferralCode,
+  resolveReferrerId,
+} = require('../utils/referral');
 
 const OTP_TTL_MS = 5 * 60 * 1000;
 
@@ -54,6 +58,32 @@ async function issueTokensForUser(userId) {
   });
 
   return { accessToken, refreshToken };
+}
+
+async function createUniqueReferralCode() {
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    const referralCode = generateReferralCode();
+    // eslint-disable-next-line no-await-in-loop
+    const exists = await prisma.user.findFirst({
+      where: { referralCode },
+      select: { id: true },
+    });
+    if (!exists) return referralCode;
+  }
+  throw new AppError('Could not generate referral code', 500);
+}
+
+async function createUserWithReferral(data, referralCodeInput) {
+  const referredByUserId = await resolveReferrerId(referralCodeInput);
+  const referralCode = await createUniqueReferralCode();
+
+  return prisma.user.create({
+    data: {
+      ...data,
+      referralCode,
+      ...(referredByUserId ? { referredByUserId } : {}),
+    },
+  });
 }
 
 exports.signupStart = catchAsync(async (req, res) => {
@@ -117,7 +147,10 @@ exports.signupVerifyOtp = catchAsync(async (req, res) => {
 });
 
 exports.signupSetPassword = catchAsync(async (req, res) => {
-  const { signupSessionId, password, ...rawContact } = parseBody(AUTH_VALIDATION.signupSetPassword, req);
+  const { signupSessionId, password, referralCode, ...rawContact } = parseBody(
+    AUTH_VALIDATION.signupSetPassword,
+    req,
+  );
   const contact = normalizeContact(rawContact);
 
   const session = await prisma.signupSession.findFirst({
@@ -133,12 +166,13 @@ exports.signupSetPassword = catchAsync(async (req, res) => {
 
   const passwordHash = await bcrypt.hash(password, 12);
 
-  const user = await prisma.user.create({
-    data: {
+  const user = await createUserWithReferral(
+    {
       ...contact,
-      passwordHash
-    }
-  });
+      passwordHash,
+    },
+    referralCode,
+  );
 
   await prisma.signupSession.update({
     where: { id: session.id },
@@ -258,7 +292,7 @@ exports.logout = catchAsync(async (req, res) => {
 });
 
 exports.googleVerify = catchAsync(async (req, res) => {
-  const { idToken } = parseBody(AUTH_VALIDATION.googleVerify, req);
+  const { idToken, referralCode } = parseBody(AUTH_VALIDATION.googleVerify, req);
 
   if (!process.env.GOOGLE_CLIENT_ID) {
     throw new AppError(AUTH_ERRORS.GOOGLE_CLIENT_ID_MISSING, 500);
@@ -290,12 +324,13 @@ exports.googleVerify = catchAsync(async (req, res) => {
 
   const user =
     existingUser ??
-    (await prisma.user.create({
-      data: {
+    (await createUserWithReferral(
+      {
         googleSub,
-        ...(payload?.email ? { email: payload.email } : {})
-      }
-    }));
+        ...(payload?.email ? { email: payload.email } : {}),
+      },
+      referralCode,
+    ));
 
   const tokens = await issueTokensForUser(user.id);
   const hasProfile = !!(existingUser?.profile);

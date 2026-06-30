@@ -27,7 +27,8 @@ const AUTH_VALIDATION = Object.freeze({
   signupSetPassword: requireExactlyOneContact(
     contactBaseSchema.extend({
       signupSessionId: z.string().min(1),
-      password: z.string().min(6).max(100)
+      password: z.string().min(6).max(100),
+      referralCode: z.string().trim().min(1).max(32).optional(),
     })
   ),
   loginStart: contactSchema,
@@ -50,7 +51,10 @@ const AUTH_VALIDATION = Object.freeze({
     }, 'Provide exactly one of identifier, phone, or email'),
   refresh: z.object({ refreshToken: z.string().min(10) }),
   logout: z.object({ refreshToken: z.string().min(10) }),
-  googleVerify: z.object({ idToken: z.string().min(50) }),
+  googleVerify: z.object({
+    idToken: z.string().min(50),
+    referralCode: z.string().trim().min(1).max(32).optional(),
+  }),
   forgotPasswordStart: requireExactlyOneContact(contactBaseSchema),
   forgotPasswordVerify: requireExactlyOneContact(
     contactBaseSchema.extend({
