@@ -2,6 +2,7 @@ const { Server } = require('socket.io');
 const { verifyAccessToken } = require('../utils/jwt');
 const prisma = require('../utils/prisma');
 const { sendFcmToTokens } = require('../services/fcmMessaging');
+const { photoUrl } = require('../utils/photos');
 
 let io;
 const onlineSocketCounts = new Map();
@@ -128,7 +129,23 @@ async function sendPushNotification({ message, conversationId, senderId, memberI
     if (tokenRows.length === 0) return;
 
     const tokens = [...new Set(tokenRows.map((r) => r.token))];
-    await sendFcmToTokens({ tokens, message, conversationId, senderId });
+
+    const sender = await prisma.user.findUnique({
+      where: { id: String(senderId) },
+      select: { profile: { select: { firstName: true, lastName: true, photos: true } } },
+    });
+    const senderName =
+      `${sender?.profile?.firstName ?? ''} ${sender?.profile?.lastName ?? ''}`.trim() || 'New message';
+    const senderPhotoUrl = photoUrl(sender?.profile?.photos?.[0]) ?? '';
+
+    await sendFcmToTokens({
+      tokens,
+      message,
+      conversationId,
+      senderId,
+      senderName,
+      senderPhotoUrl,
+    });
   } catch (err) {
     console.error('[FCM] Push failed:', err.message);
   }

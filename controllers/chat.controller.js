@@ -177,16 +177,29 @@ exports.listMessages = catchAsync(async (req, res) => {
 
   await ensureConversationMember(conversationId, me);
 
+  const conversation = await prisma.conversation.findUnique({ where: { id: conversationId } });
+  const peerId = conversation?.memberIds?.find((id) => id !== me) ?? null;
+
   const where = {
     conversationId,
     ...(cursor ? { createdAt: { lt: new Date(cursor) } } : {})
   };
 
-  const messages = await prisma.message.findMany({
-    where,
-    orderBy: { createdAt: 'desc' },
-    take: limit
-  });
+  const [messages, peerReadState] = await Promise.all([
+    prisma.message.findMany({
+      where,
+      orderBy: { createdAt: 'desc' },
+      take: limit
+    }),
+    peerId
+      ? prisma.conversationReadState.findUnique({
+          where: { conversationId_userId: { conversationId, userId: String(peerId) } },
+          select: { lastReadAt: true },
+        })
+      : null,
+  ]);
+
+  const peerReadAt = peerReadState?.lastReadAt ? new Date(peerReadState.lastReadAt) : null;
 
   const now = new Date();
   const toMarkViewed = [];
@@ -212,10 +225,21 @@ exports.listMessages = catchAsync(async (req, res) => {
   }
 
   const oldest = messages[messages.length - 1] ?? null;
+  const items = redacted.reverse().map((m) => {
+    const base = { ...m };
+    if (String(m.senderId) === me && peerId && peerReadAt) {
+      const msgAt = new Date(m.createdAt);
+      if (msgAt <= peerReadAt) {
+        base.readBy = [String(peerId)];
+      }
+    }
+    return base;
+  });
+
   res.json({
     status: 'success',
     data: {
-      items: redacted.reverse(),
+      items,
       nextCursor: oldest ? oldest.createdAt.toISOString() : null
     }
   });

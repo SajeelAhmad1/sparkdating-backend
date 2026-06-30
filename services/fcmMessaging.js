@@ -15,7 +15,7 @@ function buildPreview(message) {
   return 'New message';
 }
 
-function buildDataPayload(conversationId, message, senderId) {
+function buildDataPayload(conversationId, message, senderId, senderName, senderPhotoUrl) {
   const createdAt =
     message.createdAt instanceof Date
       ? message.createdAt.toISOString()
@@ -31,6 +31,8 @@ function buildDataPayload(conversationId, message, senderId) {
     conversationId: String(conversationId),
     messageId: String(message.id),
     senderId: String(senderId),
+    senderName: String(senderName ?? ''),
+    senderPhotoUrl: String(senderPhotoUrl ?? ''),
     messageType: String(message.type ?? 'text'),
     textPreview: preview,
     createdAt,
@@ -57,23 +59,31 @@ function collectInvalidFcmTokens(responses, tokens) {
 
 // ── Send via Expo Push Service (for ExponentPushToken[...] tokens) ────────────
 
-async function sendViaExpoPush({ expoTokens, message, conversationId, senderId }) {
+async function sendViaExpoPush({ expoTokens, message, conversationId, senderId, senderName, senderPhotoUrl }) {
   if (expoTokens.length === 0) return { sent: 0, failed: 0, invalidRemoved: 0 };
 
   const body = buildPreview(message);
-  const data = buildDataPayload(conversationId, message, senderId);
+  const data = buildDataPayload(conversationId, message, senderId, senderName, senderPhotoUrl);
+  const title = senderName || 'New message';
 
-  const messages = expoTokens.map((token) => ({
-    to: token,
-    title: 'New message',
-    body,
-    data,
-    sound: null, // no custom sound — avoids "custom sound not found" warning
-    channelId: 'chat',
-    priority: 'high',
-    ttl: FCM_TTL_SECONDS,
-    collapseKey: String(conversationId),
-  }));
+  const messages = expoTokens.map((token) => {
+    const pushMsg = {
+      to: token,
+      title,
+      body,
+      data,
+      sound: null,
+      channelId: 'chat',
+      priority: 'high',
+      ttl: FCM_TTL_SECONDS,
+      collapseKey: String(conversationId),
+    };
+    if (senderPhotoUrl) {
+      pushMsg.mutableContent = true;
+      pushMsg.richContent = { image: senderPhotoUrl };
+    }
+    return pushMsg;
+  });
 
   const chunks = expo.chunkPushNotifications(messages);
   let sent = 0;
@@ -118,7 +128,7 @@ async function sendViaExpoPush({ expoTokens, message, conversationId, senderId }
 
 // ── Send via Firebase Admin SDK (for raw FCM tokens) ─────────────────────────
 
-async function sendViaFirebase({ fcmTokens, message, conversationId, senderId }) {
+async function sendViaFirebase({ fcmTokens, message, conversationId, senderId, senderName, senderPhotoUrl }) {
   if (fcmTokens.length === 0) return { sent: 0, failed: 0, invalidRemoved: 0 };
 
   const messaging = getMessaging();
@@ -127,8 +137,12 @@ async function sendViaFirebase({ fcmTokens, message, conversationId, senderId })
     return { sent: 0, failed: fcmTokens.length, invalidRemoved: 0 };
   }
 
-  const data = buildDataPayload(conversationId, message, senderId);
-  const notification = { title: 'New message', body: buildPreview(message) };
+  const data = buildDataPayload(conversationId, message, senderId, senderName, senderPhotoUrl);
+  const notification = {
+    title: senderName || 'New message',
+    body: buildPreview(message),
+    ...(senderPhotoUrl ? { imageUrl: senderPhotoUrl } : {}),
+  };
 
   let sent = 0;
   let failed = 0;
@@ -146,13 +160,20 @@ async function sendViaFirebase({ fcmTokens, message, conversationId, senderId })
           priority: 'high',
           ttl: FCM_TTL_SECONDS * 1000,
           collapseKey: String(conversationId),
+          ...(senderPhotoUrl
+            ? { notification: { imageUrl: senderPhotoUrl } }
+            : {}),
         },
         apns: {
           headers: {
             'apns-priority': '10',
             'apns-collapse-id': String(conversationId),
             'apns-expiration': String(Math.floor(Date.now() / 1000) + FCM_TTL_SECONDS),
+            ...(senderPhotoUrl ? { 'mutable-content': '1' } : {}),
           },
+          ...(senderPhotoUrl
+            ? { fcmOptions: { imageUrl: senderPhotoUrl } }
+            : {}),
         },
       });
 
@@ -179,7 +200,7 @@ async function sendViaFirebase({ fcmTokens, message, conversationId, senderId })
 
 // ── Main entry: routes tokens to correct sender ───────────────────────────────
 
-async function sendFcmToTokens({ tokens, message, conversationId, senderId }) {
+async function sendFcmToTokens({ tokens, message, conversationId, senderId, senderName, senderPhotoUrl }) {
   const unique = [...new Set(tokens.filter(Boolean))];
   if (unique.length === 0) return { sent: 0, failed: 0, invalidRemoved: 0 };
 
@@ -189,9 +210,10 @@ async function sendFcmToTokens({ tokens, message, conversationId, senderId }) {
 
   console.log(`[FCM] Sending to ${expoTokens.length} Expo tokens, ${fcmTokens.length} FCM tokens`);
 
+  const meta = { senderName, senderPhotoUrl };
   const [expoResult, fcmResult] = await Promise.all([
-    sendViaExpoPush({ expoTokens, message, conversationId, senderId }),
-    sendViaFirebase({ fcmTokens, message, conversationId, senderId }),
+    sendViaExpoPush({ expoTokens, message, conversationId, senderId, ...meta }),
+    sendViaFirebase({ fcmTokens, message, conversationId, senderId, ...meta }),
   ]);
 
   return {
