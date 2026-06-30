@@ -69,11 +69,16 @@ exports.signupStart = catchAsync(async (req, res) => {
     data: { ...contact, otpHash, otpExpiresAt }
   });
 
+  if(process.env.NODE_ENV === 'production') {
   if (contact.email) {
     await sendOtpEmail({ to: contact.email, otp, type: 'signup', ttlMinutes: 5 });
   } else if (contact.phone) {
     await sendOtpSms({ to: contact.phone, otp, type: 'signup', ttlMinutes: 5 });
   }
+  } else {
+    console.log(`OTP for ${contact.email || contact.phone}: ${otp}`);
+  }
+
 
   res.status(201).json({
     status: 'success',
@@ -164,11 +169,16 @@ exports.loginStart = catchAsync(async (req, res) => {
   const session = await prisma.signupSession.create({
     data: { ...contact, otpHash, otpExpiresAt }
   });
-  if (contact.email) {
+  
+ if(process.env.NODE_ENV === 'production'){
+ if (contact.email) {
     await sendOtpEmail({ to: contact.email, otp, type: 'login', ttlMinutes: 5 });
   } else if (contact.phone) {
     await sendOtpSms({ to: contact.phone, otp, type: 'login', ttlMinutes: 5 });
   }
+ } else {
+   console.log(`OTP for ${contact.email || contact.phone}: ${otp}`);
+ }
 
   res.status(201).json({ status: 'success', data: { loginSessionId: String(session.id), next: 'enter_otp' } });
 });
@@ -321,11 +331,17 @@ exports.forgotPasswordStart = catchAsync(async (req, res) => {
     data: { ...contact, otpHash, otpExpiresAt }
   });
 
+
+  if(process.env.NODE_ENV === 'production') {
   if (contact.email) {
     await sendOtpEmail({ to: contact.email, otp, type: 'password_reset', ttlMinutes: 5 });
   } else if (contact.phone) {
     await sendOtpSms({ to: contact.phone, otp, type: 'password_reset', ttlMinutes: 5 });
   }
+  } else {
+    console.log(`OTP for ${contact.email || contact.phone}: ${otp}`);
+  }
+
 
   res.status(201).json({
     status: 'success',
