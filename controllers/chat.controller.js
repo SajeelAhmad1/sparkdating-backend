@@ -193,9 +193,12 @@ exports.listMessages = catchAsync(async (req, res) => {
   const redacted = messages.map((m) => {
     if (m.type !== 'streak') return m;
     const isSender = String(m.senderId) === me;
+    // Senders always keep their media — they took the photo, they can replay it.
+    // Only receivers have the ephemeral view-once restriction.
+    if (isSender) return m;
     const isExpired = m.streakExpiresAt ? new Date(m.streakExpiresAt) <= now : false;
     const alreadyViewed = Array.isArray(m.streakViewedBy) && m.streakViewedBy.includes(me);
-    if (isSender || isExpired || alreadyViewed) return { ...m, media: null };
+    if (isExpired || alreadyViewed) return { ...m, media: null };
     toMarkViewed.push(String(m.id));
     return m;
   });
