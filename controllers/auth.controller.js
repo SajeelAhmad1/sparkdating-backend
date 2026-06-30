@@ -291,10 +291,22 @@ exports.logout = catchAsync(async (req, res) => {
   res.json({ status: 'success' });
 });
 
+function getGoogleTokenAudiences() {
+  const audiences = [
+    process.env.GOOGLE_CLIENT_ID,
+    process.env.GOOGLE_CLIENT_ID_IOS,
+    process.env.GOOGLE_CLIENT_ID_ANDROID,
+  ].filter(Boolean);
+
+  if (!audiences.length) return null;
+  return audiences.length === 1 ? audiences[0] : audiences;
+}
+
 exports.googleVerify = catchAsync(async (req, res) => {
   const { idToken, referralCode } = parseBody(AUTH_VALIDATION.googleVerify, req);
 
-  if (!process.env.GOOGLE_CLIENT_ID) {
+  const audiences = getGoogleTokenAudiences();
+  if (!audiences) {
     throw new AppError(AUTH_ERRORS.GOOGLE_CLIENT_ID_MISSING, 500);
   }
 
@@ -307,7 +319,7 @@ exports.googleVerify = catchAsync(async (req, res) => {
   try {
     const ticket = await client.verifyIdToken({
       idToken,
-      audience: process.env.GOOGLE_CLIENT_ID
+      audience: audiences,
     });
     payload = ticket.getPayload();
   } catch {
