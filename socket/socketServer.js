@@ -1,40 +1,19 @@
 const { Server } = require('socket.io');
 const { verifyAccessToken } = require('../utils/jwt');
 const prisma = require('../utils/prisma');
-const { enqueueFcmNotification } = require('../queue/fcmQueue');
-const Redis = require('ioredis');
-const { redisConnection } = require('../queue/fcmQueue');
-
-// Redis client for publishing online-user presence keys
-// Worker reads these to suppress FCM for online users
-let redisClient = null;
-function getRedis() {
-  if (!redisClient) {
-    const conn = redisConnection();
-    const redisOpts = {
-      ...(conn.url ? {} : conn),
-      maxRetriesPerRequest: null,
-      retryStrategy: (times) => Math.min(times * 1000, 30000),
-      ...(conn.tls ? { tls: conn.tls } : {}),
-    };
-    redisClient = conn.url ? new Redis(conn.url, redisOpts) : new Redis(redisOpts);
-    redisClient.on('error', (err) =>
-      console.error('[Socket/Redis] error:', err.message || err.code || 'Connection failed - is Redis running?')
-    );
-  }
-  return redisClient;
-}
-
-const ONLINE_KEY_TTL = 90; // seconds — refreshed on each new socket connection
+const { sendFcmToTokens } = require('../services/fcmMessaging');
 
 let io;
-const onlineSocketCounts = new Map(); // userId -> number of connected sockets
+const onlineSocketCounts = new Map();
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function log(event, data) {
-  // eslint-disable-next-line no-console
   console.log(`[Socket] ${event}`, JSON.stringify(data ?? {}));
+}
+
+function isUserOnline(userId) {
+  return (onlineSocketCounts.get(String(userId)) ?? 0) > 0;
 }
 
 async function ensureConversationMember(conversationId, userId) {
@@ -88,19 +67,75 @@ async function emitPresenceToPeers(userId, isOnline) {
   log('presence:update', payload);
 }
 
-// ── Core: emit message:new only to conversation room (no double-emit) ─────────
-// FIX: previously also emitted to each user:<id> room causing duplicates.
-// Now only the conversation room is used — all members in that room get it once.
-// Members NOT in the room (background) rely on FCM push notification.
-function emitMessageNew(conversationId, message) {
+function emitMessageNew(conversationId, message, recipientIds = []) {
   if (!io) return;
   const payload = { conversationId: String(conversationId), message };
   io.to(roomForConversation(conversationId)).emit('message:new', payload);
+  for (const rid of recipientIds) {
+    io.to(roomForUser(rid)).emit('message:new', payload);
+  }
   log('message:new', { conversationId, messageId: message.id });
 }
 
-// ── Shared message persistence (single source of truth) ──────────────────────
-// Both socket message:send and REST sendMessage delegate here to avoid duplication.
+function emitMessageDelivered(conversationId, messageId, recipientIds, senderId) {
+  if (!io || !recipientIds.length) return;
+  const payload = {
+    conversationId: String(conversationId),
+    messageId: String(messageId),
+    userIds: recipientIds.map(String),
+  };
+  io.to(roomForUser(String(senderId))).emit('message:delivered', payload);
+  io.to(roomForConversation(conversationId)).emit('message:delivered', payload);
+  log('message:delivered', { conversationId, messageId, recipientIds });
+}
+
+async function notifyDeliveredOnJoin(conversationId, viewerId) {
+  const latestPeerMessage = await prisma.message.findFirst({
+    where: { conversationId, senderId: { not: String(viewerId) } },
+    orderBy: { createdAt: 'desc' },
+    select: { id: true, senderId: true },
+  });
+  if (!latestPeerMessage) return;
+  emitMessageDelivered(
+    conversationId,
+    latestPeerMessage.id,
+    [String(viewerId)],
+    latestPeerMessage.senderId
+  );
+}
+
+// ── FCM push (inline, no queue) ─────────────────────────────────────────────
+
+async function sendPushNotification({ message, conversationId, senderId, memberIds, suppressUserIds = [] }) {
+  try {
+    const suppressed = new Set([String(senderId), ...suppressUserIds.map(String)]);
+    const candidates = [...new Set(memberIds.map(String))].filter((id) => !suppressed.has(id));
+    const offlineIds = candidates.filter((id) => !isUserOnline(id));
+
+    if (offlineIds.length === 0) return;
+
+    const enabledUsers = await prisma.user.findMany({
+      where: { id: { in: offlineIds }, fcmNotificationsEnabled: true },
+      select: { id: true },
+    });
+    const enabledIds = enabledUsers.map((u) => String(u.id));
+    if (enabledIds.length === 0) return;
+
+    const tokenRows = await prisma.fcmToken.findMany({
+      where: { userId: { in: enabledIds } },
+      select: { token: true },
+    });
+    if (tokenRows.length === 0) return;
+
+    const tokens = [...new Set(tokenRows.map((r) => r.token))];
+    await sendFcmToTokens({ tokens, message, conversationId, senderId });
+  } catch (err) {
+    console.error('[FCM] Push failed:', err.message);
+  }
+}
+
+// ── Shared message persistence ────────────────────────────────────────────────
+
 async function persistAndBroadcast({ conversationId, senderId, type, text, media, streak }) {
   const createdAt = new Date();
   const message = await prisma.message.create({
@@ -122,10 +157,17 @@ async function persistAndBroadcast({ conversationId, senderId, type, text, media
     data: { lastMessageAt: message.createdAt }
   });
 
-  // Auto-mark read for recipients currently in the conversation room
-  const inRoom = getUsersCurrentlyInConversation(conversationId);
   const conv = await prisma.conversation.findUnique({ where: { id: conversationId } });
   const recipients = (conv?.memberIds ?? []).map(String).filter((id) => id !== String(senderId));
+
+  emitMessageNew(conversationId, message, recipients);
+
+  const deliveredRecipients = recipients.filter((id) => isUserOnline(id));
+  if (deliveredRecipients.length > 0) {
+    emitMessageDelivered(conversationId, message.id, deliveredRecipients, senderId);
+  }
+
+  const inRoom = getUsersCurrentlyInConversation(conversationId);
   const activeRecipients = recipients.filter((id) => inRoom.has(id));
 
   if (activeRecipients.length > 0) {
@@ -138,24 +180,25 @@ async function persistAndBroadcast({ conversationId, senderId, type, text, media
         })
       )
     );
-    // Notify room that these recipients have read up to this message
-    io.to(roomForConversation(conversationId)).emit('message:read', {
+
+    const readPayload = {
       conversationId,
       messageId: String(message.id),
       userIds: activeRecipients
-    });
+    };
+
+    io.to(roomForConversation(conversationId)).emit('message:read', readPayload);
+    io.to(roomForUser(String(senderId))).emit('message:read', readPayload);
+
     log('message:read (auto)', { conversationId, messageId: message.id, activeRecipients });
   }
 
-  emitMessageNew(conversationId, message);
-
-  // Enqueue FCM job — fully decoupled, never blocks message flow
-  enqueueFcmNotification({
-    messageId: String(message.id),
+  sendPushNotification({
+    message,
     conversationId: String(conversationId),
     senderId: String(senderId),
     memberIds: (conv?.memberIds ?? []).map(String),
-    suppressUserIds: activeRecipients,
+    suppressUserIds: [...activeRecipients, ...deliveredRecipients],
   });
 
   return message;
@@ -168,7 +211,6 @@ function initSocket(httpServer) {
     cors: { origin: true, credentials: true }
   });
 
-  // Auth middleware
   io.use((socket, next) => {
     const raw = socket.handshake.auth?.token ?? socket.handshake.query?.token;
     const token = typeof raw === 'string' ? raw : Array.isArray(raw) ? raw[0] : null;
@@ -186,8 +228,8 @@ function initSocket(httpServer) {
   io.on('connection', (socket) => {
     const userId = socket.data.userId;
     socket.data.joinedConversations = new Set();
+    socket.data.convPeerMap = {};
 
-    // Each user has a personal room for presence updates
     socket.join(roomForUser(userId));
 
     const prev = onlineSocketCounts.get(String(userId)) ?? 0;
@@ -195,11 +237,8 @@ function initSocket(httpServer) {
     if (prev === 0) {
       emitPresenceToPeers(userId, true).catch(() => {});
     }
-    // Publish online status to Redis so FCM worker can suppress notifications
-    getRedis().set(`online:${String(userId)}`, String(prev + 1), 'EX', ONLINE_KEY_TTL).catch(() => {});
     log('connection', { userId, totalSockets: prev + 1 });
 
-    // ── conversation:join ─────────────────────────────────────────────────
     socket.on('conversation:join', async (payload, cb) => {
       try {
         const conversationId = String(payload?.conversationId ?? '').trim();
@@ -208,24 +247,27 @@ function initSocket(httpServer) {
         if (!conv) throw new Error('Forbidden');
         await socket.join(roomForConversation(conversationId));
         socket.data.joinedConversations.add(conversationId);
+        socket.data.convPeerMap[conversationId] = conv.memberIds
+          .map(String)
+          .filter((id) => id !== String(userId));
         log('conversation:join', { userId, conversationId });
+        notifyDeliveredOnJoin(conversationId, userId).catch(() => {});
         if (typeof cb === 'function') cb({ ok: true });
       } catch (e) {
         if (typeof cb === 'function') cb({ ok: false, error: e.message });
       }
     });
 
-    // ── conversation:leave ────────────────────────────────────────────────
     socket.on('conversation:leave', (payload) => {
       const conversationId = String(payload?.conversationId ?? '').trim();
       if (conversationId) {
         socket.leave(roomForConversation(conversationId));
         socket.data.joinedConversations?.delete(conversationId);
+        delete socket.data.convPeerMap[conversationId];
         log('conversation:leave', { userId, conversationId });
       }
     });
 
-    // ── message:send (socket is the ONLY send path) ───────────────────────
     socket.on('message:send', async (payload, cb) => {
       try {
         const conversationId = String(payload?.conversationId ?? '').trim();
@@ -257,7 +299,6 @@ function initSocket(httpServer) {
       }
     });
 
-    // ── message:read (socket-based read receipts) ─────────────────────────
     socket.on('message:read', async (payload, cb) => {
       try {
         const conversationId = String(payload?.conversationId ?? '').trim();
@@ -269,7 +310,7 @@ function initSocket(httpServer) {
 
         const message = await prisma.message.findUnique({
           where: { id: lastReadMessageId },
-          select: { id: true, conversationId: true, createdAt: true }
+          select: { id: true, conversationId: true, createdAt: true, senderId: true }
         });
         if (!message || String(message.conversationId) !== conversationId) {
           throw new Error('Message not found in this conversation');
@@ -281,33 +322,42 @@ function initSocket(httpServer) {
           update: { lastReadMessageId: String(message.id), lastReadAt: message.createdAt }
         });
 
-        // Broadcast read receipt to all members in the room
-        io.to(roomForConversation(conversationId)).emit('message:read', {
+        const readPayload = {
           conversationId,
           messageId: String(message.id),
           userIds: [String(userId)]
-        });
-        log('message:read', { userId, conversationId, messageId: message.id });
+        };
 
+        io.to(roomForConversation(conversationId)).emit('message:read', readPayload);
+
+        const senderId = String(message.senderId ?? '');
+        if (senderId && senderId !== String(userId)) {
+          io.to(roomForUser(senderId)).emit('message:read', readPayload);
+        }
+
+        log('message:read', { userId, conversationId, messageId: message.id });
         if (typeof cb === 'function') cb({ ok: true });
       } catch (e) {
         if (typeof cb === 'function') cb({ ok: false, error: e.message });
       }
     });
 
-    // ── typing:start / typing:stop ────────────────────────────────────────
-    // FIX: removed DB membership check on every keystroke — use joinedConversations set instead
+    function broadcastTyping(conversationId, isTyping) {
+      const typingPayload = { conversationId, userId: String(userId), isTyping };
+      socket.to(roomForConversation(conversationId)).emit('typing:update', typingPayload);
+      const peers = socket.data.convPeerMap?.[conversationId] ?? [];
+      for (const pid of peers) {
+        io.to(roomForUser(pid)).emit('typing:update', typingPayload);
+      }
+    }
+
     socket.on('typing:start', (payload, cb) => {
       const conversationId = String(payload?.conversationId ?? '').trim();
       if (!conversationId || !socket.data.joinedConversations?.has(conversationId)) {
         if (typeof cb === 'function') cb({ ok: false, error: 'Not in conversation' });
         return;
       }
-      socket.to(roomForConversation(conversationId)).emit('typing:update', {
-        conversationId,
-        userId: String(userId),
-        isTyping: true
-      });
+      broadcastTyping(conversationId, true);
       if (typeof cb === 'function') cb({ ok: true });
     });
 
@@ -317,28 +367,22 @@ function initSocket(httpServer) {
         if (typeof cb === 'function') cb({ ok: false, error: 'Not in conversation' });
         return;
       }
-      socket.to(roomForConversation(conversationId)).emit('typing:update', {
-        conversationId,
-        userId: String(userId),
-        isTyping: false
-      });
+      broadcastTyping(conversationId, false);
       if (typeof cb === 'function') cb({ ok: true });
     });
 
-    // ── presence:ping (query current online status) ───────────────────────
     socket.on('presence:ping', (payload, cb) => {
       const targetId = String(payload?.userId ?? '').trim();
       if (!targetId) {
         if (typeof cb === 'function') cb({ ok: false, error: 'userId required' });
         return;
       }
-      const isOnline = (onlineSocketCounts.get(targetId) ?? 0) > 0;
-      const status = isOnline ? 'online' : 'offline';
+      const online = (onlineSocketCounts.get(targetId) ?? 0) > 0;
+      const status = online ? 'online' : 'offline';
       socket.emit('presence:update', { userId: targetId, status });
       if (typeof cb === 'function') cb({ ok: true, userId: targetId, status });
     });
 
-    // ── disconnect ────────────────────────────────────────────────────────
     socket.on('disconnect', () => {
       const cur = onlineSocketCounts.get(String(userId)) ?? 0;
       const next = Math.max(0, cur - 1);
@@ -346,11 +390,6 @@ function initSocket(httpServer) {
       else onlineSocketCounts.set(String(userId), next);
       if (cur > 0 && next === 0) {
         emitPresenceToPeers(userId, false).catch(() => {});
-        // Remove online key from Redis so FCM worker sends notifications again
-        getRedis().del(`online:${String(userId)}`).catch(() => {});
-      } else if (next > 0) {
-        // Update count in Redis
-        getRedis().set(`online:${String(userId)}`, String(next), 'EX', ONLINE_KEY_TTL).catch(() => {});
       }
       log('disconnect', { userId, remainingSockets: next });
     });
