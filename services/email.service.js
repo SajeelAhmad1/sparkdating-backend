@@ -1,8 +1,12 @@
-const { Resend } = require('resend');
+const Mailjet = require('node-mailjet');
 
-const resend = new Resend(process.env.RESEND_API_KEY);
+const mailjet = Mailjet.apiConnect(
+  process.env.MAILJET_API_KEY,
+  process.env.MAILJET_SECRET_KEY,
+);
 
-const FROM_ADDRESS = 'Spark Dating <onboarding@resend.dev>';
+const FROM_EMAIL = process.env.MAIL_FROM_EMAIL;
+const FROM_NAME  = process.env.MAIL_FROM_NAME;
 
 /**
  * @param {object} opts
@@ -13,39 +17,56 @@ const FROM_ADDRESS = 'Spark Dating <onboarding@resend.dev>';
  */
 async function sendOtpEmail({ to, otp, type, ttlMinutes = 5 }) {
   const subjects = {
-    signup: 'Your Spark verification code',
-    login: 'Your Spark login code',
+    signup:         'Your Spark verification code',
+    login:          'Your Spark login code',
     password_reset: 'Your Spark password reset code',
   };
 
   const headings = {
-    signup: 'Verify your email',
-    login: 'Your login code',
+    signup:         'Verify your email',
+    login:          'Your login code',
     password_reset: 'Reset your password',
   };
 
   const descriptions = {
-    signup: 'Use the code below to verify your email address and complete sign up.',
-    login: 'Use the code below to log in to your Spark account.',
+    signup:         'Use the code below to verify your email address and complete sign up.',
+    login:          'Use the code below to log in to your Spark account.',
     password_reset: 'Use the code below to reset your Spark account password.',
   };
 
-  const subject = subjects[type] ?? 'Your Spark code';
-  const heading = headings[type] ?? 'Your verification code';
+  const subject     = subjects[type]      ?? 'Your Spark code';
+  const heading     = headings[type]      ?? 'Your verification code';
   const description = descriptions[type] ?? 'Use the code below to continue.';
 
   const html = buildOtpHtml({ otp, heading, description, ttlMinutes });
 
-  const { error } = await resend.emails.send({
-    from: FROM_ADDRESS,
-    to,
-    subject,
-    html,
-  });
+  try {
+    const response = await mailjet
+      .post('send', { version: 'v3.1' })
+      .request({
+        Messages: [
+          {
+            From: {
+              Email: FROM_EMAIL,
+              Name:  FROM_NAME,
+            },
+            To: [{ Email: to }],
+            Subject: subject,
+            HTMLPart: html,
+          },
+        ],
+      });
 
-  if (error) {
-    const message = error?.message ?? JSON.stringify(error);
-    throw new Error(`Failed to send OTP email: ${message}`);
+    const status = response.body?.Messages?.[0]?.Status;
+    if (status && status !== 'success') {
+      const errors = JSON.stringify(response.body?.Messages?.[0]?.Errors ?? response.body);
+      throw new Error(`Mailjet rejected the message: ${errors}`);
+    }
+  } catch (err) {
+    if (process.env.NODE_ENV !== 'production') {
+      console.error('[Mailjet] Error sending OTP email:', err?.response?.data ?? err.message);
+    }
+    throw new Error(`Failed to send OTP email: ${err.message}`);
   }
 }
 
