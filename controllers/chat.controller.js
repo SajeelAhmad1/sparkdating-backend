@@ -36,13 +36,14 @@ exports.createDirectConversation = catchAsync(async (req, res) => {
   const target = await prisma.user.findUnique({ where: { id: userId }, select: { id: true } });
   if (!target) throw new AppError('User not found', 404);
 
+  const peerId = String(userId);
   let conversation = await prisma.conversation.findFirst({
-    where: { type: 'direct', memberIds: { hasEvery: [me, userId] } }
+    where: { type: 'direct', memberIds: { hasEvery: [me, peerId] } }
   });
 
   if (!conversation) {
     conversation = await prisma.conversation.create({
-      data: { type: 'direct', memberIds: [me, userId] }
+      data: { type: 'direct', memberIds: [me, peerId] }
     });
   }
 
@@ -67,7 +68,9 @@ exports.listConversations = catchAsync(async (req, res) => {
 
   const convIds = conversations.map((c) => String(c.id));
   const peerIds = [...new Set(
-    conversations.map((c) => c.memberIds.find((id) => id !== me)).filter(Boolean)
+    conversations
+      .map((c) => c.memberIds.map(String).find((id) => id !== me))
+      .filter(Boolean)
   )];
 
   // Batch all queries in parallel — no N+1
@@ -136,8 +139,8 @@ exports.listConversations = catchAsync(async (req, res) => {
   const now = new Date();
   const items = conversations.map((c) => {
     const cid = String(c.id);
-    const peerId = c.memberIds.find((id) => id !== me) ?? null;
-    const peer = peerId ? peerMap.get(peerId) : null;
+    const peerId = c.memberIds.map(String).find((id) => id !== me) ?? null;
+    const peer = peerId ? peerMap.get(String(peerId)) : null;
     const lastMessage = lastMsgMap.get(cid) ?? null;
 
     const ref = lastMessage?.createdAt ?? c.lastMessageAt ?? null;
