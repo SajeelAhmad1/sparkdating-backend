@@ -6,6 +6,11 @@ const { CHAT_VALIDATION } = require('../validations/chat.validation');
 
 const { photoUrls } = require('../utils/photos');
 
+function toIso(value) {
+  if (value == null) return null;
+  return value instanceof Date ? value.toISOString() : String(value);
+}
+
 function toPeer(user) {
   return {
     id: String(user.id),
@@ -157,11 +162,11 @@ exports.listConversations = catchAsync(async (req, res) => {
             text: lastMessage.text,
             senderId: String(lastMessage.senderId),
             media: lastMessage.type === 'streak' ? null : lastMessage.media,
-            streakExpiresAt: lastMessage.streakExpiresAt,
-            createdAt: lastMessage.createdAt
+            streakExpiresAt: toIso(lastMessage.streakExpiresAt),
+            createdAt: toIso(lastMessage.createdAt)
           }
         : null,
-      lastMessageAt: c.lastMessageAt
+      lastMessageAt: toIso(c.lastMessageAt)
     };
   });
 

@@ -70,12 +70,32 @@ async function emitPresenceToPeers(userId, isOnline) {
 
 function emitMessageNew(conversationId, message, recipientIds = []) {
   if (!io) return;
-  const payload = { conversationId: String(conversationId), message };
+  const serialized = serializeMessage(message, conversationId);
+  const payload = { conversationId: String(conversationId), message: serialized };
   io.to(roomForConversation(conversationId)).emit('message:new', payload);
   for (const rid of recipientIds) {
     io.to(roomForUser(rid)).emit('message:new', payload);
   }
-  log('message:new', { conversationId, messageId: message.id });
+  log('message:new', { conversationId, messageId: serialized.id });
+}
+
+function serializeMessage(message, conversationId) {
+  const toIso = (v) => {
+    if (v == null) return null;
+    return v instanceof Date ? v.toISOString() : String(v);
+  };
+  return {
+    id: String(message.id),
+    conversationId: String(message.conversationId ?? conversationId),
+    senderId: String(message.senderId),
+    type: message.type,
+    text: message.text ?? null,
+    media: message.media ?? null,
+    streakExpiresAt: toIso(message.streakExpiresAt),
+    streakViewedBy: Array.isArray(message.streakViewedBy) ? message.streakViewedBy.map(String) : [],
+    createdAt: toIso(message.createdAt),
+    updatedAt: toIso(message.updatedAt ?? message.createdAt),
+  };
 }
 
 function emitMessageDelivered(conversationId, messageId, recipientIds, senderId) {
@@ -309,7 +329,9 @@ function initSocket(httpServer) {
           streak: payload?.streak
         });
 
-        if (typeof cb === 'function') cb({ ok: true, data: { message } });
+        if (typeof cb === 'function') {
+          cb({ ok: true, data: { message: serializeMessage(message, conversationId) } });
+        }
       } catch (e) {
         log('message:send error', { userId, error: e.message });
         if (typeof cb === 'function') cb({ ok: false, error: e.message });
