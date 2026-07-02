@@ -448,6 +448,7 @@ exports.forgotPasswordReset = catchAsync(async (req, res) => {
 });
 
 exports.completeProfile = catchAsync(async (req, res) => {
+  console.log('[completeProfile] raw body:', JSON.stringify(req.body, null, 2));
   const { firstName, lastName, gender, dob, bio, height, ethnicity, interests, photos } = parseBody(
     AUTH_VALIDATION.completeProfile,
     req
