@@ -20,6 +20,47 @@ function toPeer(user) {
   };
 }
 
+// Returns the number of consecutive days (ending today UTC) where both users
+// exchanged at least one streak message. One exchange per day max — just like Snapchat.
+async function computeStreakScore(conversationId, memberIds) {
+  // Fetch all streak messages for this conversation, newest first, up to 400 days back
+  const cutoff = new Date();
+  cutoff.setUTCDate(cutoff.getUTCDate() - 400);
+  const messages = await prisma.message.findMany({
+    where: { conversationId, type: 'streak', createdAt: { gte: cutoff } },
+    select: { senderId: true, createdAt: true },
+    orderBy: { createdAt: 'desc' }
+  });
+
+  if (messages.length === 0) return 0;
+
+  // Group by UTC date string → set of senderIds
+  const dayMap = new Map();
+  for (const m of messages) {
+    const day = m.createdAt.toISOString().slice(0, 10);
+    if (!dayMap.has(day)) dayMap.set(day, new Set());
+    dayMap.get(day).add(String(m.senderId));
+  }
+
+  // Walk backwards from today counting consecutive days where both members sent
+  const todayUtc = new Date().toISOString().slice(0, 10);
+  let score = 0;
+  const cursor = new Date();
+  cursor.setUTCHours(0, 0, 0, 0);
+
+  for (let i = 0; i < 400; i++) {
+    const day = cursor.toISOString().slice(0, 10);
+    const senders = dayMap.get(day);
+    const bothSent = senders && memberIds.every((id) => senders.has(String(id)));
+    // Today: if neither has sent yet, don't break the streak (grace period)
+    if (!bothSent && day !== todayUtc) break;
+    if (bothSent) score++;
+    cursor.setUTCDate(cursor.getUTCDate() - 1);
+  }
+
+  return score;
+}
+
 async function ensureConversationMember(conversationId, userId) {
   const conversation = await prisma.conversation.findUnique({ where: { id: conversationId } });
   if (!conversation) throw new AppError('Conversation not found', 404);
@@ -74,7 +115,7 @@ exports.listConversations = catchAsync(async (req, res) => {
   )];
 
   // Batch all queries in parallel — no N+1
-  const [peers, lastMessages, readStates, streakCounts, unreadCounts] = await Promise.all([
+  const [peers, lastMessages, readStates, unreadCounts] = await Promise.all([
     // All peer profiles in one query
     prisma.user.findMany({
       where: { id: { in: peerIds } },
@@ -90,18 +131,6 @@ exports.listConversations = catchAsync(async (req, res) => {
     prisma.conversationReadState.findMany({
       where: { conversationId: { in: convIds }, userId: me }
     }),
-    // Streak counts per conversation in one aggregation
-    prisma.message.groupBy({
-      by: ['conversationId'],
-      where: {
-        conversationId: { in: convIds },
-        type: 'streak',
-        senderId: { not: me },
-        streakExpiresAt: { gt: new Date() },
-        NOT: { streakViewedBy: { has: me } }
-      },
-      _count: { id: true }
-    }),
     // Unread counts per conversation
     prisma.message.groupBy({
       by: ['conversationId'],
@@ -110,11 +139,16 @@ exports.listConversations = catchAsync(async (req, res) => {
     })
   ]);
 
+  // Compute mutual streak scores per conversation
+  const streakScores = await Promise.all(
+    conversations.map((c) => computeStreakScore(String(c.id), c.memberIds.map(String)))
+  );
+  const streakMap = new Map(conversations.map((c, i) => [String(c.id), streakScores[i]]));
+
   // Index into maps for O(1) lookup
   const peerMap = new Map(peers.map((p) => [String(p.id), p]));
   const lastMsgMap = new Map(lastMessages.map((m) => [String(m.conversationId), m]));
   const readStateMap = new Map(readStates.map((r) => [String(r.conversationId), r]));
-  const streakMap = new Map(streakCounts.map((s) => [String(s.conversationId), s._count.id]));
   const totalMsgMap = new Map(unreadCounts.map((u) => [String(u.conversationId), u._count.id]));
 
   // For unread: need messages after lastReadAt — batch per conversation

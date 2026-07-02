@@ -96,12 +96,13 @@ function hasSharedInterest(user, myInterestIds) {
 function mapDiscoveryUser(user, distanceByUserId) {
   const age = calculateAge(user.profile.dob);
   const loc = distanceByUserId.get(String(user.id));
+  const showAge = user.profile.showAge !== false;
 
   return {
     id: String(user.id),
     firstName: user.profile.firstName,
     lastName: user.profile.lastName,
-    age,
+    age: showAge ? age : null,
     gender: user.profile.gender,
     bio: user.profile.bio,
     photos: photoUrls(user.profile.photos),
@@ -119,7 +120,7 @@ function discoveryPrefsFromUser(user) {
 }
 
 let indexInitPromise = null;
-async function ensureGeoIndexes() {
+function ensureGeoIndexes() {
   if (!indexInitPromise) {
     indexInitPromise = Promise.all([
       prisma.$runCommandRaw({
@@ -130,13 +131,12 @@ async function ensureGeoIndexes() {
         createIndexes: 'ServiceArea',
         indexes: [{ key: { geometry: '2dsphere' }, name: 'ServiceArea_geometry_2dsphere' }]
       })
-    ]);
+    ]).catch(() => { indexInitPromise = null; });
   }
-  await indexInitPromise;
 }
 
 async function isInServiceArea(lat, lng) {
-  await ensureGeoIndexes();
+  ensureGeoIndexes();
   const areas = await prisma.serviceArea.findRaw({
     filter: {
       isActive: true,
@@ -219,6 +219,9 @@ exports.discoverProfiles = catchAsync(async (req, res) => {
   });
 
   const viewedToday = dailyView?.count ?? 0;
+  const firstViewedAt = dailyView?.firstViewedAt ?? nowUtc;
+  const resetsAt = new Date(firstViewedAt.getTime() + 24 * 60 * 60 * 1000);
+
   const remaining = Math.max(0, DAILY_PROFILE_LIMIT - viewedToday);
 
   if (remaining === 0) {
@@ -231,7 +234,7 @@ exports.discoverProfiles = catchAsync(async (req, res) => {
           daily: DAILY_PROFILE_LIMIT,
           used: viewedToday,
           remaining: 0,
-          resetsAt: startOfNextDay.toISOString()
+          resetsAt: resetsAt.toISOString()
         }
       }
     });
@@ -411,11 +414,12 @@ exports.discoverProfiles = catchAsync(async (req, res) => {
     ? buildDiscoveryNextCursor(responseUsers[responseUsers.length - 1])
     : null;
 
-  // Increment daily view count
   const newCount = viewedToday + responseUsers.length;
+  const upsertFirstViewedAt = dailyView?.firstViewedAt ?? nowUtc;
+  const upsertResetsAt = new Date(upsertFirstViewedAt.getTime() + 24 * 60 * 60 * 1000);
   await prisma.dailyDiscoveryView.upsert({
     where: { userId_date: { userId: myUserId, date: todayUtc } },
-    create: { userId: myUserId, date: todayUtc, count: responseUsers.length, resetAt: startOfNextDay },
+    create: { userId: myUserId, date: todayUtc, count: responseUsers.length, resetAt: upsertResetsAt, firstViewedAt: nowUtc },
     update: { count: newCount }
   });
 
@@ -436,7 +440,7 @@ exports.discoverProfiles = catchAsync(async (req, res) => {
         daily: DAILY_PROFILE_LIMIT,
         used: newCount,
         remaining: Math.max(0, DAILY_PROFILE_LIMIT - newCount),
-        resetsAt: startOfNextDay.toISOString()
+        resetsAt: upsertResetsAt.toISOString()
       }
     }
   });

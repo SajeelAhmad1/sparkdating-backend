@@ -132,15 +132,10 @@ async function sendPushNotification({ message, conversationId, senderId, memberI
     const suppressed = new Set([String(senderId), ...suppressUserIds.map(String)]);
     const candidates = [...new Set(memberIds.map(String))].filter((id) => !suppressed.has(id));
 
-    // Only suppress users who are actively viewing THIS conversation room
-    // (not just online — they may be in a different screen)
-    const inRoom = getUsersCurrentlyInConversation(conversationId);
-    const offlineOrAway = candidates.filter((id) => !inRoom.has(id));
-
-    if (offlineOrAway.length === 0) return;
+    if (candidates.length === 0) return;
 
     const enabledUsers = await prisma.user.findMany({
-      where: { id: { in: offlineOrAway }, fcmNotificationsEnabled: true },
+      where: { id: { in: candidates }, fcmNotificationsEnabled: true },
       select: { id: true },
     });
     const enabledIds = enabledUsers.map((u) => String(u.id));
@@ -239,7 +234,6 @@ async function persistAndBroadcast({ conversationId, senderId, type, text, media
     conversationId: String(conversationId),
     senderId: String(senderId),
     memberIds: (conv?.memberIds ?? []).map(String),
-    suppressUserIds: [...activeRecipients],
   });
 
   return message;
