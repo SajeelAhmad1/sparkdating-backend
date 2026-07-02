@@ -45,6 +45,7 @@ const DISCOVERY_DEFAULT_LIMIT = 10;
 const DISCOVERY_MAX_LIMIT = 50;
 const DISCOVERY_INTERNAL_BATCH_BUFFER = 5;
 const DISCOVERY_NEARBY_LOCATION_LIMIT = 1000;
+const DAILY_PROFILE_LIMIT = 20;
 
 function encodeDiscoveryCursor(payload) {
   return Buffer.from(JSON.stringify(payload), 'utf8').toString('base64');
@@ -205,6 +206,40 @@ exports.discoverProfiles = catchAsync(async (req, res) => {
   const decodedCursor = decodeDiscoveryCursor(cursor);
 
   if (!me.profile) throw new AppError(DISCOVERY_ERRORS.PROFILE_REQUIRED, 403);
+
+  // ── Daily quota check ─────────────────────────────────────────────────────────────────
+  const nowUtc = new Date();
+  const todayUtc = nowUtc.toISOString().slice(0, 10); // YYYY-MM-DD
+  const startOfNextDay = new Date(Date.UTC(
+    nowUtc.getUTCFullYear(), nowUtc.getUTCMonth(), nowUtc.getUTCDate() + 1
+  ));
+
+  let dailyView = await prisma.dailyDiscoveryView.findUnique({
+    where: { userId_date: { userId: myUserId, date: todayUtc } }
+  });
+
+  const viewedToday = dailyView?.count ?? 0;
+  const remaining = Math.max(0, DAILY_PROFILE_LIMIT - viewedToday);
+
+  if (remaining === 0) {
+    return res.json({
+      status: 'success',
+      data: {
+        profiles: [],
+        nextCursor: null,
+        quota: {
+          daily: DAILY_PROFILE_LIMIT,
+          used: viewedToday,
+          remaining: 0,
+          resetsAt: startOfNextDay.toISOString()
+        }
+      }
+    });
+  }
+
+  // Cap requested limit to remaining quota
+  const effectiveLimit = Math.min(requestedLimit, remaining);
+
   const discoveryFilter = discoveryPrefsFromUser(me);
   const myAge = calculateAge(me.profile.dob);
   const minAge = Math.max(18, myAge - discoveryFilter.youngerAgeDelta);
@@ -248,8 +283,9 @@ exports.discoverProfiles = catchAsync(async (req, res) => {
           maxAge,
           basedOnMyAge: myAge
         },
-        users: [],
-        nextCursor: null
+        profiles: [],
+        nextCursor: null,
+        quota: { daily: DAILY_PROFILE_LIMIT, used: viewedToday, remaining, resetsAt: startOfNextDay.toISOString() }
       }
     });
   }
@@ -302,8 +338,9 @@ exports.discoverProfiles = catchAsync(async (req, res) => {
           maxAge,
           basedOnMyAge: myAge
         },
-        users: [],
-        nextCursor: null
+        profiles: [],
+        nextCursor: null,
+        quota: { daily: DAILY_PROFILE_LIMIT, used: viewedToday, remaining, resetsAt: startOfNextDay.toISOString() }
       }
     });
   }
@@ -312,10 +349,10 @@ exports.discoverProfiles = catchAsync(async (req, res) => {
   const distanceByUserId = new Map(
     nearbyLocations.map((loc) => [String(loc.userId?.$oid ?? loc.userId), { lat: loc.lat, lng: loc.lng }])
   );
-  const targetCount = requestedLimit + 1;
+  const targetCount = effectiveLimit + 1;
   const internalBatchSize = Math.min(
     DISCOVERY_MAX_LIMIT,
-    Math.max(requestedLimit + DISCOVERY_INTERNAL_BATCH_BUFFER, requestedLimit * 2)
+    Math.max(effectiveLimit + DISCOVERY_INTERNAL_BATCH_BUFFER, effectiveLimit * 2)
   );
 
   let queryCursor = decodedCursor;
@@ -369,10 +406,18 @@ exports.discoverProfiles = catchAsync(async (req, res) => {
     }
   }
 
-  const responseUsers = collectedUsers.slice(0, requestedLimit);
-  const nextCursor = collectedUsers.length > requestedLimit
+  const responseUsers = collectedUsers.slice(0, effectiveLimit);
+  const nextCursor = collectedUsers.length > effectiveLimit
     ? buildDiscoveryNextCursor(responseUsers[responseUsers.length - 1])
     : null;
+
+  // Increment daily view count
+  const newCount = viewedToday + responseUsers.length;
+  await prisma.dailyDiscoveryView.upsert({
+    where: { userId_date: { userId: myUserId, date: todayUtc } },
+    create: { userId: myUserId, date: todayUtc, count: responseUsers.length, resetAt: startOfNextDay },
+    update: { count: newCount }
+  });
 
   res.json({
     status: 'success',
@@ -386,7 +431,13 @@ exports.discoverProfiles = catchAsync(async (req, res) => {
         basedOnMyAge: myAge
       },
       profiles: responseUsers.map((user) => mapDiscoveryUser(user, distanceByUserId)),
-      nextCursor
+      nextCursor,
+      quota: {
+        daily: DAILY_PROFILE_LIMIT,
+        used: newCount,
+        remaining: Math.max(0, DAILY_PROFILE_LIMIT - newCount),
+        resetsAt: startOfNextDay.toISOString()
+      }
     }
   });
 });

@@ -8,6 +8,8 @@ router.post('/conversations/direct', chatController.createDirectConversation);
 router.get('/conversations', chatController.listConversations);
 router.get('/conversations/:conversationId/messages', chatController.listMessages);
 
+router.patch('/conversations/:conversationId/messages/:messageId/viewed', chatController.markSnapViewed);
+
 // NOTE: POST /conversations/:id/messages (send) and POST /conversations/:id/read
 // are intentionally removed — handled exclusively via Socket.IO message:send and message:read.
 

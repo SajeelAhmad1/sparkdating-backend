@@ -58,6 +58,7 @@ model Profile {
   height    Int?
   ethnicity String?
   photos    Json[]   @default([])
+  showAge   Boolean  @default(true)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -362,5 +363,19 @@ model DiscoveryFilter {
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+}
+
+model DailyDiscoveryView {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  userId    String   @db.ObjectId
+  date      String   // YYYY-MM-DD in UTC
+  count     Int      @default(0)
+  resetAt   DateTime // start of next UTC day
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, date])
+  @@index([userId])
 }
 

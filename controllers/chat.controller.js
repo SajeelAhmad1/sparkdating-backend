@@ -210,7 +210,6 @@ exports.listMessages = catchAsync(async (req, res) => {
   const peerReadAt = peerReadState?.lastReadAt ? new Date(peerReadState.lastReadAt) : null;
 
   const now = new Date();
-  const toMarkViewed = [];
   const redacted = messages.map((m) => {
     if (m.type !== 'streak') return m;
     const isSender = String(m.senderId) === me;
@@ -219,18 +218,11 @@ exports.listMessages = catchAsync(async (req, res) => {
     if (isSender) return m;
     const isExpired = m.streakExpiresAt ? new Date(m.streakExpiresAt) <= now : false;
     const alreadyViewed = Array.isArray(m.streakViewedBy) && m.streakViewedBy.includes(me);
+    // Redact media if expired or already viewed — do NOT auto-mark as viewed here.
+    // Viewing is only recorded via the explicit PATCH .../viewed endpoint.
     if (isExpired || alreadyViewed) return { ...m, media: null };
-    toMarkViewed.push(String(m.id));
     return m;
   });
-
-  if (toMarkViewed.length) {
-    await Promise.all(
-      toMarkViewed.map((id) =>
-        prisma.message.update({ where: { id }, data: { streakViewedBy: { push: me } } })
-      )
-    );
-  }
 
   const oldest = messages[messages.length - 1] ?? null;
   const items = redacted.reverse().map((m) => {
@@ -251,6 +243,35 @@ exports.listMessages = catchAsync(async (req, res) => {
       nextCursor: oldest ? oldest.createdAt.toISOString() : null
     }
   });
+});
+
+// ── REST: Mark snap viewed (one-time view) ───────────────────────────────────
+exports.markSnapViewed = catchAsync(async (req, res) => {
+  const conversationId = String(req.params.conversationId ?? '').trim();
+  const messageId = String(req.params.messageId ?? '').trim();
+  const me = String(req.user.id);
+
+  if (!conversationId || !messageId) throw new AppError('conversationId and messageId required', 400);
+  await ensureConversationMember(conversationId, me);
+
+  const message = await prisma.message.findUnique({ where: { id: messageId } });
+  if (!message || String(message.conversationId) !== conversationId) throw new AppError('Message not found', 404);
+  if (message.type !== 'streak') throw new AppError('Not a streak message', 400);
+
+  // Sender cannot mark their own snap as viewed
+  if (String(message.senderId) === me) throw new AppError('Sender cannot view their own snap', 403);
+
+  // Already viewed — idempotent
+  if (Array.isArray(message.streakViewedBy) && message.streakViewedBy.includes(me)) {
+    return res.json({ status: 'success', data: { alreadyViewed: true } });
+  }
+
+  await prisma.message.update({
+    where: { id: messageId },
+    data: { streakViewedBy: { push: me } }
+  });
+
+  res.json({ status: 'success', data: { viewed: true } });
 });
 
 // NOTE: sendMessage (REST) and markConversationRead (REST) are intentionally removed.

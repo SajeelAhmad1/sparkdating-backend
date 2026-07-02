@@ -87,7 +87,8 @@ const AUTH_VALIDATION = Object.freeze({
       height: z.number().min(50).max(300).optional(),
       ethnicity: z.string().max(80).optional(),
       interests: z.array(z.string()).min(3).max(5).optional(),
-      photos: z.array(z.object({ url: z.string().min(1), publicId: z.string().min(1) })).min(1).max(4).optional()
+      photos: z.array(z.object({ url: z.string().min(1), publicId: z.string().min(1) })).min(1).max(4).optional(),
+      showAge: z.boolean().optional()
     })
     .refine((data) => Object.keys(data).length > 0, 'Provide at least one field to update')
 });

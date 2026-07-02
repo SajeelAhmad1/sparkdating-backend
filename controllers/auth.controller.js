@@ -530,6 +530,7 @@ exports.editProfile = catchAsync(async (req, res) => {
   if (payload.ethnicity !== undefined) profileUpdateData.ethnicity = payload.ethnicity;
   if (payload.photos !== undefined) profileUpdateData.photos = payload.photos;
   if (payload.height !== undefined) profileUpdateData.height = Math.round(payload.height);
+  if (payload.showAge !== undefined) profileUpdateData.showAge = payload.showAge;
 
   if (payload.dob !== undefined) {
     const dobDate = new Date(payload.dob);
