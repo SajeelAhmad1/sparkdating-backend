@@ -291,9 +291,9 @@ exports.logout = catchAsync(async (req, res) => {
 
 function getGoogleTokenAudiences() {
   const audiences = [
-    process.env.EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID,
-    process.env.EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID,
-    process.env.EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID
+    process.env.GOOGLE_WEB_CLIENT_ID,
+    process.env.GOOGLE_IOS_CLIENT_ID,
+    process.env.GOOGLE_ANDROID_CLIENT_ID
   ].filter(Boolean);
 
   if (!audiences.length) return null;
