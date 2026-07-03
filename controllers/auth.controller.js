@@ -104,7 +104,7 @@ exports.signupStart = catchAsync(async (req, res) => {
   } else if (contact.phone) {
     await sendOtpSms({ to: contact.phone, otp, type: 'signup', ttlMinutes: 5 });
   }
-  if (process.env.NODE_ENV === 'development') {
+  if (process.env.NODE_ENV === 'production') {
     console.log(`[DEV] OTP for ${contact.email || contact.phone}: ${otp}`);
   }
 
@@ -208,7 +208,7 @@ exports.loginStart = catchAsync(async (req, res) => {
   } else if (contact.phone) {
     await sendOtpSms({ to: contact.phone, otp, type: 'login', ttlMinutes: 5 });
   }
-  if (process.env.NODE_ENV === 'development') {
+  if (process.env.NODE_ENV === 'production') {
     console.log(`[DEV] OTP for ${contact.email || contact.phone}: ${otp}`);
   }
 
@@ -389,7 +389,7 @@ exports.forgotPasswordStart = catchAsync(async (req, res) => {
   } else if (contact.phone) {
     await sendOtpSms({ to: contact.phone, otp, type: 'password_reset', ttlMinutes: 5 });
   }
-  if (process.env.NODE_ENV === 'development') {
+  if (process.env.NODE_ENV === 'production') {
     console.log(`[DEV] OTP for ${contact.email || contact.phone}: ${otp}`);
   }
 
