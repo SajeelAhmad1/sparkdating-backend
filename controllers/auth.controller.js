@@ -303,7 +303,14 @@ function getGoogleTokenAudiences() {
 exports.googleVerify = catchAsync(async (req, res) => {
   const { idToken, referralCode } = parseBody(AUTH_VALIDATION.googleVerify, req);
 
+    console.log("========== GOOGLE LOGIN ==========");
+  console.log("GOOGLE_WEB_CLIENT_ID:", process.env.GOOGLE_WEB_CLIENT_ID);
+  console.log("GOOGLE_ANDROID_CLIENT_ID:", process.env.GOOGLE_ANDROID_CLIENT_ID);
+  console.log("GOOGLE_IOS_CLIENT_ID:", process.env.GOOGLE_IOS_CLIENT_ID);
+  console.log("ID Token Received:", !!idToken);
+
   const audiences = getGoogleTokenAudiences();
+  console.log("Audiences:", audiences);
   if (!audiences) {
     throw new AppError(AUTH_ERRORS.GOOGLE_CLIENT_ID_MISSING, 500);
   }
