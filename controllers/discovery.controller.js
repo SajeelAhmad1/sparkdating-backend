@@ -252,7 +252,8 @@ exports.discoverProfiles = catchAsync(async (req, res) => {
   const oldestDob = new Date(Date.UTC(now.getUTCFullYear() - maxAge, now.getUTCMonth(), now.getUTCDate()));
 
   const area = await isInServiceArea(lat, lng);
-  if (!area.isSupported) throw new AppError(DISCOVERY_ERRORS.LOCATION_OUTSIDE_SERVICE_AREA, 403);
+  // console.log(area, area.isSupported)
+  // if (!area.isSupported) throw new AppError(DISCOVERY_ERRORS.LOCATION_OUTSIDE_SERVICE_AREA, 403);
 
   await prisma.userLocation.upsert({
     where: { userId: myUserId },
