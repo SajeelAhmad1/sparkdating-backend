@@ -311,7 +311,7 @@ exports.googleVerify = catchAsync(async (req, res) => {
   // Lazy-load so non-google flows don't require the dependency at runtime.
   // eslint-disable-next-line global-require
   const { OAuth2Client } = require('google-auth-library');
-  const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
+  const client = new OAuth2Client(process.env.GOOGLE_WEB_CLIENT_ID);
 
   let payload;
   try {
