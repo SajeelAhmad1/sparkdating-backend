@@ -305,8 +305,8 @@ exports.googleVerify = catchAsync(async (req, res) => {
 
     console.log("========== GOOGLE LOGIN ==========");
   console.log("GOOGLE_WEB_CLIENT_ID:", process.env.GOOGLE_WEB_CLIENT_ID);
-  console.log("GOOGLE_ANDROID_CLIENT_ID:", process.env.GOOGLE_ANDROID_CLIENT_ID);
-  console.log("GOOGLE_IOS_CLIENT_ID:", process.env.GOOGLE_IOS_CLIENT_ID);
+  // console.log("GOOGLE_ANDROID_CLIENT_ID:", process.env.GOOGLE_ANDROID_CLIENT_ID);
+  // console.log("GOOGLE_IOS_CLIENT_ID:", process.env.GOOGLE_IOS_CLIENT_ID);
   console.log("ID Token Received:", !!idToken);
 
   const audiences = getGoogleTokenAudiences();
